@@ -1,0 +1,1 @@
+cd /mnt/e/jwk/llm/mai/ai-passage-creator-main && docker compose up -d

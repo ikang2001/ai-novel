@@ -379,10 +379,6 @@ DASHSCOPE_MODEL=qwen-plus  # 或 qwen-turbo、qwen-max 等
 
 欢迎提交 Issue 和 Pull Request！
 
-## 📄 License
-
-MIT License
-
 ## 👨‍💻 作者
 
 [ikang2001](https://github.com/ikang2001)

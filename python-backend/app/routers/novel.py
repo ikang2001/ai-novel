@@ -17,7 +17,8 @@ from app.schemas.common import BaseResponse
 from app.schemas.novel import (
     NovelCreateRequest, NovelSettingUpdateRequest, StyleAnalyzeRequest,
     ChapterPlanRequest, ChapterGenerateRequest, ChapterConfirmRequest,
-    ChapterContentUpdateRequest, CharacterCreateRequest, CharacterUpdateRequest,
+    ChapterContentUpdateRequest, ChapterCreateRequest,
+    CharacterCreateRequest, CharacterUpdateRequest,
     ForeshadowingCreateRequest, ForeshadowingUpdateRequest,
 )
 from app.schemas.user import LoginUserVO
@@ -114,6 +115,19 @@ async def get_novel(novel_id: int,
     """获取小说详情"""
     novel = await services["novel_service"].get_novel(novel_id)
     _check_novel_permission(novel, current_user)
+
+    # 自动修正统计：检查实际章节数与 novel 表记录是否一致
+    actual = await services["novel_service"]._fetch_one(
+        """SELECT COUNT(*) AS chapter_count,
+                  COALESCE(SUM(wordCount), 0) AS total_wc
+           FROM chapter WHERE novelId = :novelId AND isDelete = 0""",
+        {"novelId": novel_id},
+    )
+    if (actual["chapter_count"] != novel.get("currentChapterNumber", 0) or
+            actual["total_wc"] != novel.get("totalWordCount", 0)):
+        await services["novel_service"].recalculate_novel_stats(novel_id)
+        novel = await services["novel_service"].get_novel(novel_id)
+
     return {"code": 0, "data": novel, "message": "ok"}
 
 
@@ -295,6 +309,26 @@ async def plan_chapter(novel_id: int, request: ChapterPlanRequest,
     return {"code": 0, "data": result, "message": "ok"}
 
 
+@router.post("/{novel_id}/chapter/create", response_model=BaseResponse[dict])
+async def create_chapter_manual(novel_id: int, request: ChapterCreateRequest,
+                                current_user: LoginUserVO = Depends(require_login),
+                                services: dict = Depends(_get_services)):
+    """手动创建空白章节"""
+    novel = await services["novel_service"].get_novel(novel_id)
+    throw_if_not(novel, ErrorCode.NOT_FOUND_ERROR, "小说不存在")
+    _check_novel_permission(novel, current_user)
+
+    chapter_number = request.chapter_number or await services["novel_service"].get_next_chapter_number(novel_id)
+    chapter_id = await services["novel_service"].create_chapter(
+        novel_id=novel_id,
+        volume_number=novel.get("currentVolumeNumber", 1),
+        chapter_number=chapter_number,
+        title=request.title or f"第{chapter_number}章",
+    )
+    await services["novel_service"].recalculate_novel_stats(novel_id)
+    return {"code": 0, "data": {"chapterId": chapter_id, "chapterNumber": chapter_number}, "message": "ok"}
+
+
 @router.post("/{novel_id}/chapter/generate", response_model=BaseResponse[dict])
 async def generate_chapter(novel_id: int, request: ChapterGenerateRequest,
                            current_user: LoginUserVO = Depends(require_login),
@@ -397,6 +431,7 @@ async def delete_chapter(chapter_id: int,
     _check_novel_permission(novel, current_user)
 
     await services["novel_service"].delete_chapter(chapter_id)
+    await services["novel_service"].recalculate_novel_stats(chapter["novelId"])
     return {"code": 0, "data": True, "message": "ok"}
 
 
@@ -451,7 +486,13 @@ async def check_consistency(novel_id: int,
     """连贯性检查（阶段6）"""
     novel = await services["novel_service"].get_novel(novel_id)
     _check_novel_permission(novel, current_user)
-    result = await services["async_service"].review_sync(novel_id)
+    try:
+        result = await services["async_service"].review_sync(novel_id)
+    except ValueError as e:
+        throw_if(True, ErrorCode.NOT_FOUND_ERROR, str(e))
+    except Exception as e:
+        logger.error("连贯性检查失败: %s", e)
+        throw_if(True, ErrorCode.SYSTEM_ERROR, f"连贯性检查失败: {str(e)}")
     return {"code": 0, "data": result, "message": "ok"}
 
 

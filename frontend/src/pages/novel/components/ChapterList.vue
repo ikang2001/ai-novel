@@ -2,10 +2,6 @@
   <div class="chapter-list">
     <div class="chapter-list-header">
       <span class="title">章节列表</span>
-      <a-button type="primary" size="small" @click="$emit('planNew')">
-        <template #icon><PlusOutlined /></template>
-        规划新章节
-      </a-button>
     </div>
 
     <div class="chapter-scroll">
@@ -64,7 +60,7 @@
 
 <script setup lang="ts">
 import { ref, nextTick } from 'vue'
-import { PlusOutlined, MoreOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons-vue'
+import { MoreOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import { deleteChapter, updateChapterTitle } from '@/api/novelController'
 

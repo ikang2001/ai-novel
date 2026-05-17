@@ -6,7 +6,6 @@
         :chapters="chapters"
         :active-chapter-id="activeChapterId"
         @select="handleSelectChapter"
-        @plan-new="handlePlanChapter"
         @refresh="loadChapters"
       />
     </aside>
@@ -18,7 +17,7 @@
         <BookOutlined class="welcome-icon" />
         <h2>{{ novel?.title || '小说写作' }}</h2>
         <p>从左侧选择一个章节开始写作，或规划一个新章节</p>
-        <a-button type="primary" size="large" @click="handlePlanChapter">
+        <a-button type="primary" size="large" @click="handlePlanChapter" :loading="planning">
           <template #icon><PlusOutlined /></template>
           规划新章节
         </a-button>
@@ -203,6 +202,7 @@ const activeChapter = ref<API.ChapterVO | null>(null)
 
 // 状态
 const isGenerating = ref(false)
+const planning = ref(false)
 const streamingContent = ref('')
 const chapterContent = ref('')
 const isEditing = ref(false)
@@ -279,11 +279,13 @@ const handleSelectChapter = (id: number) => {
 
 // 规划新章节
 const handlePlanChapter = async () => {
+  planning.value = true
   try {
     const res = await planChapter(novelId, {})
     if (res.data.code === 0) {
       message.success('大纲规划成功')
       await loadChapters()
+      loadNovel()
       const data = res.data.data as any
       if (data?.chapterId) {
         handleSelectChapter(data.chapterId)
@@ -293,6 +295,8 @@ const handlePlanChapter = async () => {
     }
   } catch (e) {
     message.error('规划失败')
+  } finally {
+    planning.value = false
   }
 }
 
@@ -325,6 +329,7 @@ const handleGenerate = async () => {
           isGenerating.value = false
           loadChapterDetail(activeChapterId.value!)
           loadChapters()
+          loadNovel()
         },
       })
     } else {

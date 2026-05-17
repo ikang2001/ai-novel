@@ -182,6 +182,32 @@ class NovelService:
         )
         return row["currentChapterNumber"]
 
+    async def get_next_chapter_number(self, novel_id: int) -> int:
+        """计算下一个章节号，优先填补空缺（如删除第2章后，下一章为第2章）"""
+        # 找最小的空缺号：从 1 开始，找第一个不存在的章节号
+        row = await self._fetch_one(
+            """SELECT MIN(t.expected) AS next_num
+               FROM (
+                   SELECT 1 AS expected
+                   UNION ALL
+                   SELECT chapterNumber + 1 FROM chapter WHERE novelId = :novelId
+               ) t
+               WHERE t.expected NOT IN (
+                   SELECT chapterNumber FROM chapter WHERE novelId = :novelId
+               )""",
+            {"novelId": novel_id},
+        )
+        return row["next_num"] if row and row["next_num"] else 1
+
+    async def update_current_chapter_number(self, novel_id: int, chapter_number: int) -> None:
+        """同步更新 novel 表的 currentChapterNumber（仅当新值更大时更新）"""
+        query = """
+            UPDATE novel
+            SET currentChapterNumber = :num, updateTime = :updateTime
+            WHERE id = :novelId AND isDelete = 0 AND currentChapterNumber < :num
+        """
+        await self._execute(query, {"num": chapter_number, "updateTime": datetime.now(), "novelId": novel_id})
+
     async def update_synopsis(self, novel_id: int, synopsis: str) -> bool:
         """更新全书梗概"""
         query = "UPDATE novel SET synopsis = :synopsis, updateTime = :updateTime WHERE id = :novelId AND isDelete = 0"
@@ -329,6 +355,21 @@ class NovelService:
         await self._execute(query, {"updateTime": datetime.now(), "chapterId": chapter_id})
         logger.info("章节删除成功, chapter_id=%s", chapter_id)
         return True
+
+    async def recalculate_novel_stats(self, novel_id: int) -> None:
+        """重新计算小说的章节数和总字数（基于实际存在的章节）"""
+        row = await self._fetch_one(
+            """SELECT COUNT(*) AS chapter_count,
+                      COALESCE(SUM(wordCount), 0) AS total_words
+               FROM chapter WHERE novelId = :novelId AND isDelete = 0""",
+            {"novelId": novel_id},
+        )
+        await self._execute(
+            """UPDATE novel SET currentChapterNumber = :ch, totalWordCount = :wc, updateTime = :updateTime
+               WHERE id = :novelId AND isDelete = 0""",
+            {"ch": row["chapter_count"], "wc": row["total_words"], "updateTime": datetime.now(), "novelId": novel_id},
+        )
+        logger.info("小说统计已重算, novel_id=%s, chapters=%s, words=%s", novel_id, row["chapter_count"], row["total_words"])
 
     async def update_chapter_title(self, chapter_id: int, title: str) -> bool:
         """更新章节标题"""

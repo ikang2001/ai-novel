@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # AI 配置（第 3 期新增）
     dashscope_api_key: str
     dashscope_model: str = "qwen-plus"
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     
     # Pexels 图片搜索（第 3 期新增）
     pexels_api_key: str = ""

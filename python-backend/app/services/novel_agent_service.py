@@ -32,7 +32,7 @@ class NovelAgentService:
         # LLM 客户端（DashScope 兼容 OpenAI 接口）
         self.client = AsyncOpenAI(
             api_key=settings.dashscope_api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            base_url=settings.dashscope_base_url
         )
         self.model = settings.dashscope_model
 
@@ -77,7 +77,8 @@ class NovelAgentService:
     # ========== Agent 3：大纲助手 ==========
 
     async def agent3_plan_outline(self, novel_id: int,
-                                  author_intent: Optional[str] = None) -> Dict[str, Any]:
+                                  author_intent: Optional[str] = None,
+                                  chapter_number: Optional[int] = None) -> Dict[str, Any]:
         """大纲助手：生成本章详细大纲"""
         # 读取小说信息
         novel = await self.novel_service.get_novel(novel_id)
@@ -115,7 +116,7 @@ class NovelAgentService:
         prompt = NovelPromptConstant.AGENT3_OUTLINE_PROMPT
         prompt = prompt.replace("{title}", novel.get("title", ""))
         prompt = prompt.replace("{genre}", novel.get("genre", ""))
-        prompt = prompt.replace("{chapter_number}", str(novel.get("currentChapterNumber", 0) + 1))
+        prompt = prompt.replace("{chapter_number}", str(chapter_number or novel.get("currentChapterNumber", 0) + 1))
         prompt = prompt.replace("{volume_number}", str(novel.get("currentVolumeNumber", 1)))
         prompt = prompt.replace("{character_states}", states_text)
         prompt = prompt.replace("{recent_summaries}", summaries_text)
@@ -136,9 +137,11 @@ class NovelAgentService:
             for c in recent
         ) if recent else "暂无"
 
+        chapter_number = await self.novel_service.get_next_chapter_number(novel_id)
+
         prompt = NovelPromptConstant.AGENT3_AI_SUGGESTION_PROMPT
         prompt = prompt.replace("{title}", novel.get("title", ""))
-        prompt = prompt.replace("{chapter_number}", str(novel.get("currentChapterNumber", 0) + 1))
+        prompt = prompt.replace("{chapter_number}", str(chapter_number))
         prompt = prompt.replace("{recent_summaries}", summaries_text)
 
         content = await self._call_llm(prompt)
@@ -356,7 +359,7 @@ class NovelAgentService:
         # 读取角色表
         all_chars = await self.character_service.get_all_characters(novel_id)
         chars_text = "\n".join(
-            f"- {c['name']}（{c.get('role_type', '?')}）：{c.get('appearance', '')}，"
+            f"- {c['name']}（{c.get('roleType', '?')}）：{c.get('appearance', '')}，"
             f"性格：{c.get('personality', '')}，技能：{c.get('skills', '')}"
             for c in all_chars
         ) or "暂无角色"
@@ -421,6 +424,8 @@ class NovelAgentService:
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
         )
+        if not response.choices:
+            raise RuntimeError("LLM 返回空响应（choices 为空）")
         return response.choices[0].message.content
 
     async def _call_llm_streaming(self, prompt: str,
@@ -439,11 +444,14 @@ class NovelAgentService:
         )
 
         async for chunk in stream:
-            if chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                content_builder.append(content)
-                if stream_handler:
-                    stream_handler(content)
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if not delta or not delta.content:
+                continue
+            content_builder.append(delta.content)
+            if stream_handler:
+                stream_handler(delta.content)
 
         return "".join(content_builder)
 

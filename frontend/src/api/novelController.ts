@@ -267,6 +267,20 @@ export async function deleteChapter(chapterId: number, options?: { [key: string]
   })
 }
 
+/** 手动创建章节 POST /novel/${param0}/chapter/create */
+export async function createChapter(
+  novelId: number,
+  body: { title?: string; chapterNumber?: number },
+  options?: { [key: string]: any }
+) {
+  return request<API.BaseResponseDict>(`/novel/${novelId}/chapter/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    data: body,
+    ...(options || {}),
+  })
+}
+
 /** 修改章节标题 PUT /novel/chapter/${param0}/title */
 export async function updateChapterTitle(
   chapterId: number,

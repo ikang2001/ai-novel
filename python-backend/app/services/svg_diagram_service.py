@@ -21,7 +21,7 @@ class SvgDiagramService(ImageSearchService):
         # 使用 DashScope
         self.client = AsyncOpenAI(
             api_key=settings.dashscope_api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            base_url=settings.dashscope_base_url
         )
         self.model = settings.dashscope_model
         self.default_width = settings.svg_diagram_default_width

@@ -198,11 +198,13 @@ class NovelAsyncService:
     async def plan_outline_sync(self, novel_id: int,
                                 author_intent: Optional[str]) -> Dict[str, Any]:
         """同步规划大纲（Agent3）"""
-        result = await self.agent_service.agent3_plan_outline(novel_id, author_intent)
+        # 从已有章节中计算下一个章节号（避免删除后跳号）
+        chapter_number = await self.novel_service.get_next_chapter_number(novel_id)
+
+        result = await self.agent_service.agent3_plan_outline(novel_id, author_intent, chapter_number)
 
         # 创建章节记录
         novel = await self.novel_service.get_novel(novel_id)
-        chapter_number = novel.get("currentChapterNumber", 0) + 1
         volume_number = novel.get("currentVolumeNumber", 1)
 
         chapter_id = await self.novel_service.create_chapter(
@@ -213,8 +215,8 @@ class NovelAsyncService:
             outline=result,
         )
 
-        # 更新章节号
-        await self.novel_service.increment_chapter_number(novel_id)
+        # 同步更新 novel 表的章节数和总字数
+        await self.novel_service.recalculate_novel_stats(novel_id)
 
         result["chapterId"] = chapter_id
         result["chapterNumber"] = chapter_number

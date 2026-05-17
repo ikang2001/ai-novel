@@ -37,7 +37,7 @@
           <a-card title="世界观设定" :bordered="false" class="section-card" v-if="novel?.worldSetting">
             <div class="world-setting">
               <div v-for="(value, key) in novel.worldSetting" :key="key" class="setting-item">
-                <span class="setting-label">{{ key }}：</span>
+                <span class="setting-label">{{ worldSettingLabel(key as string) }}：</span>
                 <span class="setting-value">{{ formatSettingValue(value) }}</span>
               </div>
             </div>
@@ -46,16 +46,22 @@
           <!-- 章节列表 -->
           <a-card title="章节列表" :bordered="false" class="section-card">
             <template #extra>
-              <a-button type="primary" size="small" @click="handlePlanChapter">
-                <template #icon><PlusOutlined /></template>
-                规划下一章
-              </a-button>
+              <a-space>
+                <a-button size="small" @click="showBatchEdit = true">
+                  <template #icon><UnorderedListOutlined /></template>
+                  批量编辑
+                </a-button>
+                <a-button type="primary" size="small" @click="handlePlanChapter" :loading="planning">
+                  <template #icon><PlusOutlined /></template>
+                  规划新章节
+                </a-button>
+              </a-space>
             </template>
             <ChapterList
               :chapters="chapters"
               :active-chapter-id="null"
               @select="handleChapterSelect"
-              @plan-new="handlePlanChapter"
+              @refresh="loadChapters"
             />
           </a-card>
         </div>
@@ -144,6 +150,12 @@
       :novel="novel"
       @saved="loadNovel"
     />
+    <BatchEditModal
+      v-model:visible="showBatchEdit"
+      :novel-id="novelId"
+      :chapters="chapters"
+      @refresh="loadAll"
+    />
 
     <!-- 连贯性检查结果 -->
     <a-modal
@@ -170,11 +182,13 @@ import {
   ArrowLeftOutlined,
   EditOutlined,
   PlusOutlined,
+  UnorderedListOutlined,
 } from '@ant-design/icons-vue'
 import { getNovel, listChapters, listCharacters, listForeshadowing, checkConsistency, exportNovel, planChapter } from '@/api/novelController'
 import { GENRE_OPTIONS, GENRE_COLOR_MAP, ROLE_TYPE_TEXT_MAP, ROLE_TYPE_COLOR_MAP } from '@/constants/novel'
 import { formatWordCount } from '@/utils/novel'
 import ChapterList from './components/ChapterList.vue'
+import BatchEditModal from './components/BatchEditModal.vue'
 import CharacterPanel from './components/CharacterPanel.vue'
 import ForeshadowingPanel from './components/ForeshadowingPanel.vue'
 import StyleAnalyzeModal from './components/StyleAnalyzeModal.vue'
@@ -190,12 +204,14 @@ const chapters = ref<API.ChapterVO[]>([])
 const characters = ref<API.CharacterVO[]>([])
 const foreshadowing = ref<API.ForeshadowingVO[]>([])
 const checking = ref(false)
+const planning = ref(false)
 const consistencyResult = ref<API.ConsistencyReport | null>(null)
 
 const showCharacterPanel = ref(false)
 const showForeshadowingPanel = ref(false)
 const showStyleModal = ref(false)
 const showSettingEditor = ref(false)
+const showBatchEdit = ref(false)
 const showConsistencyReport = ref(false)
 
 const activeForeshadowing = computed(() =>
@@ -205,9 +221,27 @@ const activeForeshadowing = computed(() =>
 const getGenreLabel = (genre: string) =>
   GENRE_OPTIONS.find((g) => g.value === genre)?.label || genre
 
+const WORLD_SETTING_LABELS: Record<string, string> = {
+  era: '时代背景',
+  rules: '核心规则',
+  factions: '主要势力',
+  locations: '重要地点',
+}
+
+const worldSettingLabel = (key: string): string => {
+  return WORLD_SETTING_LABELS[key] || key
+}
+
 const formatSettingValue = (value: any): string => {
-  if (Array.isArray(value)) return value.join('、')
-  if (typeof value === 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) {
+    return value.map(item => {
+      if (typeof item === 'object' && item !== null) {
+        return item.name || item.title || JSON.stringify(item)
+      }
+      return String(item)
+    }).join('、')
+  }
+  if (typeof value === 'object' && value !== null) return JSON.stringify(value)
   return String(value)
 }
 
@@ -248,16 +282,20 @@ const handleChapterSelect = (id: number) => {
 }
 
 const handlePlanChapter = async () => {
+  planning.value = true
   try {
     const res = await planChapter(novelId, {})
     if (res.data.code === 0) {
       message.success('大纲规划成功')
       loadChapters()
+      loadNovel()
     } else {
       message.error(res.data.message || '规划失败')
     }
   } catch (e) {
     message.error('规划失败')
+  } finally {
+    planning.value = false
   }
 }
 

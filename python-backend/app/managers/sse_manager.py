@@ -3,6 +3,7 @@
 import logging
 import asyncio
 from typing import Dict
+
 from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -10,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 class SseEmitterManager:
     """SSE Emitter 管理器"""
-    
+
     def __init__(self):
         # 存储所有的队列
         self._queues: Dict[str, asyncio.Queue] = {}
-    
+
     def create_emitter(self, task_id: str) -> StreamingResponse:
         """
         创建 SSE Emitter
@@ -29,20 +30,20 @@ class SseEmitterManager:
         if task_id not in self._queues:
             self._queues[task_id] = asyncio.Queue()
         queue = self._queues[task_id]
-        
+
         logger.info(f"SSE 连接已创建, taskId={task_id}")
-        
+
         # 创建事件流生成器
         async def event_generator():
             try:
                 while True:
                     # 从队列获取消息
                     message = await queue.get()
-                    
+
                     # 如果是完成信号，结束流
                     if message == "__COMPLETE__":
                         break
-                    
+
                     # 格式化为 SSE 格式
                     yield f"data: {message}\n\n"
             except asyncio.CancelledError:
@@ -50,11 +51,8 @@ class SseEmitterManager:
             except Exception as e:
                 logger.error(f"SSE 连接错误, taskId={task_id}, error={e}")
             finally:
-                # 清理队列
-                if task_id in self._queues:
-                    del self._queues[task_id]
                 logger.info(f"SSE 连接已关闭, taskId={task_id}")
-        
+
         return StreamingResponse(
             event_generator(),
             media_type="text/event-stream",
@@ -86,8 +84,8 @@ class SseEmitterManager:
     
     def complete(self, task_id: str):
         """
-        完成连接
-        
+        完成连接（生成任务结束后调用，负责清理队列）
+
         Args:
             task_id: 任务ID
         """
@@ -95,12 +93,15 @@ class SseEmitterManager:
         if queue is None:
             logger.warning(f"SSE Emitter 不存在, taskId={task_id}")
             return
-        
+
         try:
             queue.put_nowait("__COMPLETE__")
             logger.info(f"SSE 连接已完成, taskId={task_id}")
         except Exception as e:
             logger.error(f"SSE 连接完成失败, taskId={task_id}, error={e}")
+        finally:
+            # 立即清理队列（生成任务已结束，不再需要发送消息）
+            self._queues.pop(task_id, None)
     
     def exists(self, task_id: str) -> bool:
         """

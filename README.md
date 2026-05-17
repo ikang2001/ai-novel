@@ -182,7 +182,7 @@ npm run dev
 ## 📁 项目结构
 
 ```
-ai-passage-creator-main/
+ai-novel/
 ├── python-backend/                  # Python 后端
 │   ├── app/
 │   │   ├── main.py                  # FastAPI 入口

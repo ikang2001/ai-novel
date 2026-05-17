@@ -73,6 +73,16 @@ class ChapterContentUpdateRequest(BaseModel):
     content: str = Field(..., min_length=1, description="修改后的正文")
 
 
+class ChapterCreateRequest(BaseModel):
+    """手动创建章节请求"""
+
+    title: Optional[str] = Field(None, max_length=200, description="章节标题")
+    chapter_number: Optional[int] = Field(None, alias="chapterNumber", description="章节号（为空则自动计算）")
+
+    class Config:
+        populate_by_name = True
+
+
 class CharacterCreateRequest(BaseModel):
     """创建角色请求"""
 

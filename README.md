@@ -1,10 +1,10 @@
-<h1 style="font-size: 3em; margin: 16px 0; font-weight: 900;">AI 小说创作助手</h1>
-
 <div align="center">
+<h1 style="font-size: 3em; margin: 16px 0;">AI 小说创作助手</h1>
 
-基于 FastAPI、Vue 3、MySQL、Redis、ARQ 和大语言模型的长篇小说辅助创作平台。
+<p style="font-size: 1.1em;">基于 FastAPI、Vue 3、MySQL、Redis、ARQ 和大语言模型的长篇小说辅助创作平台。</p>
+<p style="font-size: 1em;">从创意孵化、世界观与角色设定，到章节规划、正文生成、质量审稿、自动修订和状态归档，形成一套可追踪的小说创作工作流。</p>
 
-从创意孵化、世界观与角色设定，到章节规划、正文生成、质量审稿、自动修订和状态归档，形成一套可追踪的小说创作工作流。
+<br>
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white)

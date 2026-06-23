@@ -1,4 +1,4 @@
-                                                        # AI 小说创作助手
+<h1 style="font-size: 3em; margin: 16px 0; font-weight: 900;">AI 小说创作助手</h1>
 
 <div align="center">
 

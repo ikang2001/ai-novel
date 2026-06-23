@@ -1,4 +1,4 @@
-                                                                      # AI 小说创作助手
+                                                        # AI 小说创作助手
 
 <div align="center">
 

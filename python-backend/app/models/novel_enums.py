@@ -47,7 +47,10 @@ class NovelPhaseEnum(str, Enum):
     STYLE_ANALYZING = "STYLE_ANALYZING"     # 风格分析中
     READY = "READY"                         # 就绪（可开始写章节）
     CHAPTER_PLANNING = "CHAPTER_PLANNING"   # 章节大纲规划中
+    CONTEXT_PACKAGING = "CONTEXT_PACKAGING" # 上下文包组装中
     CHAPTER_GENERATING = "CHAPTER_GENERATING"  # 章节生成中
+    CHAPTER_REVIEWING = "CHAPTER_REVIEWING" # 章节审稿中
+    CHAPTER_REVISING = "CHAPTER_REVISING"   # 章节自动修订中
     ARCHIVING = "ARCHIVING"                 # 归档中
     REVIEWING = "REVIEWING"                 # 连贯性检查中
 
@@ -58,8 +61,20 @@ class NovelPhaseEnum(str, Enum):
             NovelPhaseEnum.SETTING: {NovelPhaseEnum.STYLE_ANALYZING, NovelPhaseEnum.READY},
             NovelPhaseEnum.STYLE_ANALYZING: {NovelPhaseEnum.READY},
             NovelPhaseEnum.READY: {NovelPhaseEnum.CHAPTER_PLANNING, NovelPhaseEnum.REVIEWING},
-            NovelPhaseEnum.CHAPTER_PLANNING: {NovelPhaseEnum.CHAPTER_GENERATING, NovelPhaseEnum.READY},
-            NovelPhaseEnum.CHAPTER_GENERATING: {NovelPhaseEnum.ARCHIVING, NovelPhaseEnum.READY},
+            NovelPhaseEnum.CHAPTER_PLANNING: {
+                NovelPhaseEnum.CONTEXT_PACKAGING,
+                NovelPhaseEnum.CHAPTER_GENERATING,
+                NovelPhaseEnum.READY,
+            },
+            NovelPhaseEnum.CONTEXT_PACKAGING: {NovelPhaseEnum.CHAPTER_GENERATING, NovelPhaseEnum.READY},
+            NovelPhaseEnum.CHAPTER_GENERATING: {
+                NovelPhaseEnum.CHAPTER_REVIEWING,
+                NovelPhaseEnum.CHAPTER_REVISING,
+                NovelPhaseEnum.ARCHIVING,
+                NovelPhaseEnum.READY,
+            },
+            NovelPhaseEnum.CHAPTER_REVIEWING: {NovelPhaseEnum.CHAPTER_REVISING, NovelPhaseEnum.READY},
+            NovelPhaseEnum.CHAPTER_REVISING: {NovelPhaseEnum.READY},
             NovelPhaseEnum.ARCHIVING: {NovelPhaseEnum.READY},
             NovelPhaseEnum.REVIEWING: {NovelPhaseEnum.READY},
         }
@@ -69,9 +84,12 @@ class NovelPhaseEnum(str, Enum):
 class ChapterStatusEnum(str, Enum):
     """章节状态枚举"""
 
-    DRAFT = "draft"             # 草稿（生成中或刚生成）
+    DRAFT = "draft"             # 草稿
+    GENERATING = "generating"   # 生成中
+    ARCHIVING = "archiving"     # 归档中
     CONFIRMED = "confirmed"     # 已确认（作者审阅通过）
     REVISED = "revised"         # 已修订（确认后又修改过）
+    FAILED = "failed"           # 任务失败
 
 
 class CharacterRoleTypeEnum(str, Enum):
@@ -94,6 +112,16 @@ class ForeshadowingStatusEnum(str, Enum):
     ACTIVE = "active"           # 活跃（未解决）
     RESOLVED = "resolved"       # 已揭示
     ABANDONED = "abandoned"     # 已放弃
+
+
+class ForeshadowingLifecycleStageEnum(str, Enum):
+    """伏笔内部生命周期枚举"""
+
+    PLANTED = "planted"
+    OPEN = "open"
+    PROGRESSING = "progressing"
+    NEAR_PAYOFF = "near_payoff"
+    PRESSURED = "pressured"
 
 
 class ForeshadowingCategoryEnum(str, Enum):
@@ -121,9 +149,14 @@ class NovelSseMessageTypeEnum(str, Enum):
     OUTLINE_GENERATED = "OUTLINE_GENERATED"
 
     # 章节生成（流式）
+    CONTEXT_PACKAGED = "CONTEXT_PACKAGED"
     CHAPTER_GENERATING = "CHAPTER_GENERATING"
     CHAPTER_STREAMING = "CHAPTER_STREAMING"
     CHAPTER_GENERATED = "CHAPTER_GENERATED"
+    CHAPTER_REVIEWING = "CHAPTER_REVIEWING"
+    CHAPTER_REVIEWED = "CHAPTER_REVIEWED"
+    CHAPTER_REVISING = "CHAPTER_REVISING"
+    CHAPTER_REVISED = "CHAPTER_REVISED"
 
     # 归档
     ARCHIVING = "ARCHIVING"

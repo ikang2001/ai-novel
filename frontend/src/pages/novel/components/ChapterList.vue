@@ -14,7 +14,7 @@
         <div class="chapter-left">
           <span :class="['status-dot', `status-${ch.status}`]"></span>
           <div class="chapter-info">
-            <div class="chapter-title" @dblclick="startRename(ch)">
+            <div class="chapter-title" @dblclick.stop="startRename(ch)">
               <template v-if="editingId === ch.id">
                 <a-input
                   v-model:value="editingTitle"
@@ -22,7 +22,7 @@
                   @press-enter="finishRename(ch)"
                   @blur="finishRename(ch)"
                   @click.stop
-                  ref="editInput"
+                  :ref="(el: unknown) => setEditInputRef(ch.id!, el)"
                 />
               </template>
               <template v-else>
@@ -31,18 +31,18 @@
             </div>
             <div class="chapter-meta">
               {{ ch.wordCount || 0 }} 字
-              <span v-if="ch.status === 'confirmed'" class="confirmed-tag">已确认</span>
+              <span v-if="ch.status" class="status-text">{{ CHAPTER_STATUS_TEXT_MAP[ch.status] || ch.status }}</span>
             </div>
           </div>
         </div>
         <a-dropdown :trigger="['click']" @click.stop>
           <MoreOutlined class="action-icon" />
           <template #overlay>
-            <a-menu @click="({ key }: { key: string }) => handleAction(key, ch)">
-              <a-menu-item key="rename">
+            <a-menu @click="handleMenuClick($event.key, ch)">
+              <a-menu-item key="rename" :disabled="isProcessingChapter(ch)">
                 <EditOutlined /> 重命名
               </a-menu-item>
-              <a-menu-item key="delete" class="danger-item">
+              <a-menu-item key="delete" class="danger-item" :disabled="isProcessingChapter(ch)">
                 <DeleteOutlined /> 删除
               </a-menu-item>
             </a-menu>
@@ -63,6 +63,7 @@ import { ref, nextTick } from 'vue'
 import { MoreOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import { deleteChapter, updateChapterTitle } from '@/api/novelController'
+import { CHAPTER_STATUS_TEXT_MAP } from '@/constants/novel'
 
 const props = defineProps<{
   chapters: API.ChapterVO[]
@@ -78,25 +79,44 @@ const emit = defineEmits<{
 // 重命名相关
 const editingId = ref<number | null>(null)
 const editingTitle = ref('')
+const editInputRefs = new Map<number, HTMLInputElement>()
+const lockedStatuses = new Set(['generating', 'archiving'])
+
+const setEditInputRef = (chapterId: number, el: any) => {
+  const input = el?.input as HTMLInputElement | undefined
+  if (input) {
+    editInputRefs.set(chapterId, input)
+  } else {
+    editInputRefs.delete(chapterId)
+  }
+}
+
+const isProcessingChapter = (ch: API.ChapterVO) => lockedStatuses.has(ch.status || '')
 
 const startRename = (ch: API.ChapterVO) => {
+  if (isProcessingChapter(ch)) {
+    message.warning('处理中章节暂不能重命名')
+    return
+  }
   editingId.value = ch.id!
   editingTitle.value = ch.title || ''
   nextTick(() => {
-    const input = document.querySelector('.chapter-item.active .ant-input') as HTMLInputElement
+    const input = editInputRefs.get(ch.id!)
     input?.focus()
+    input?.select()
   })
 }
 
 const finishRename = async (ch: API.ChapterVO) => {
-  if (!editingTitle.value.trim()) {
+  const nextTitle = editingTitle.value.trim()
+  if (!nextTitle) {
     message.warning('标题不能为空')
     editingId.value = null
     return
   }
-  if (editingTitle.value.trim() !== ch.title) {
+  if (nextTitle !== ch.title) {
     try {
-      const res = await updateChapterTitle(ch.id!, editingTitle.value.trim())
+      const res = await updateChapterTitle(ch.id!, nextTitle)
       if (res.data.code === 0) {
         message.success('重命名成功')
         emit('refresh')
@@ -114,6 +134,10 @@ const handleAction = (key: string, ch: API.ChapterVO) => {
   if (key === 'rename') {
     startRename(ch)
   } else if (key === 'delete') {
+    if (isProcessingChapter(ch)) {
+      message.warning('处理中章节暂不能删除')
+      return
+    }
     Modal.confirm({
       title: '确认删除',
       content: `确定要删除「第${ch.chapterNumber}章 ${ch.title || '未命名'}」吗？`,
@@ -135,6 +159,10 @@ const handleAction = (key: string, ch: API.ChapterVO) => {
       },
     })
   }
+}
+
+const handleMenuClick = (key: string, ch: API.ChapterVO) => {
+  handleAction(key, ch)
 }
 </script>
 
@@ -199,8 +227,11 @@ const handleAction = (key: string, ch: API.ChapterVO) => {
 }
 
 .status-dot.status-draft { background: #3B82F6; }
+.status-dot.status-generating { background: #8B5CF6; }
+.status-dot.status-archiving { background: #0EA5E9; }
 .status-dot.status-confirmed { background: #22C55E; }
 .status-dot.status-revised { background: #F59E0B; }
+.status-dot.status-failed { background: #EF4444; }
 
 .chapter-info {
   flex: 1;
@@ -222,8 +253,8 @@ const handleAction = (key: string, ch: API.ChapterVO) => {
   margin-top: 2px;
 }
 
-.confirmed-tag {
-  color: #22C55E;
+.status-text {
+  color: #6B7280;
   margin-left: 8px;
 }
 

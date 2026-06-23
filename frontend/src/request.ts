@@ -3,6 +3,22 @@ import { message } from 'ant-design-vue'
 import { API_BASE_URL } from '@/config/env'
 import { REQUEST_TIMEOUT, UNAUTHORIZED_CODE } from '@/constants'
 
+const LOGIN_PATH = '/user/login'
+const LOGIN_STATUS_PATH = 'user/get/login'
+
+function isLoginStatusRequest(url?: string) {
+  return url?.includes(LOGIN_STATUS_PATH) ?? false
+}
+
+function handleUnauthorized(url?: string) {
+  if (isLoginStatusRequest(url) || window.location.pathname.includes(LOGIN_PATH)) {
+    return
+  }
+
+  message.warning('请先登录')
+  window.location.href = `${LOGIN_PATH}?redirect=${window.location.href}`
+}
+
 // 创建 Axios 实例
 const myAxios = axios.create({
   baseURL: API_BASE_URL,
@@ -28,20 +44,16 @@ myAxios.interceptors.response.use(
     const { data } = response
     // 未登录
     if (data.code === UNAUTHORIZED_CODE) {
-      // 不是获取用户信息的请求，并且用户目前不是已经在用户登录页面，则跳转到登录页面
-      if (
-        !response.request.responseURL.includes('user/get/login') &&
-        !window.location.pathname.includes('/user/login')
-      ) {
-        message.warning('请先登录')
-        window.location.href = `/user/login?redirect=${window.location.href}`
-      }
+      handleUnauthorized(response.request?.responseURL ?? response.config?.url)
     }
     return response
   },
   function (error) {
     // Any status codes that falls outside the range of 2xx cause this function to trigger
     // Do something with response error
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      handleUnauthorized(error.response.request?.responseURL ?? error.config?.url)
+    }
     return Promise.reject(error)
   },
 )

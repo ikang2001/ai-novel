@@ -3,8 +3,6 @@
 from enum import Enum
 from typing import Optional
 
-from fastapi import HTTPException, status
-
 
 class ErrorCode(Enum):
     """错误码枚举"""
@@ -33,10 +31,33 @@ class ErrorCode(Enum):
 class BusinessException(Exception):
     """业务异常"""
     
-    def __init__(self, error_code: ErrorCode, message: Optional[str] = None):
+    def __init__(
+        self,
+        error_code: ErrorCode,
+        message: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ):
         self.error_code = error_code
         self.message = message or error_code.message
+        self.status_code = status_code or _default_http_status(error_code)
         super().__init__(self.message)
+
+
+def _default_http_status(error_code: ErrorCode) -> int:
+    """将业务错误码映射到 HTTP 状态码。"""
+    mapping = {
+        ErrorCode.PARAMS_ERROR: 400,
+        ErrorCode.NOT_LOGIN_ERROR: 401,
+        ErrorCode.NO_AUTH_ERROR: 403,
+        ErrorCode.NOT_FOUND_ERROR: 404,
+        ErrorCode.FORBIDDEN_ERROR: 403,
+        ErrorCode.SYSTEM_ERROR: 500,
+        ErrorCode.OPERATION_ERROR: 409,
+        ErrorCode.USER_NOT_EXIST: 404,
+        ErrorCode.USER_ALREADY_EXIST: 409,
+        ErrorCode.PASSWORD_ERROR: 401,
+    }
+    return mapping.get(error_code, 400)
 
 
 def throw_if(condition: bool, error_code: ErrorCode, message: Optional[str] = None):

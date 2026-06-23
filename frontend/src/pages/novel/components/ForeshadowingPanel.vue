@@ -91,7 +91,11 @@ const form = reactive({
 
 const loadData = async () => {
   const res = await listForeshadowing(props.novelId, statusFilter.value ? { status: statusFilter.value } : undefined)
-  if (res.data.code === 0) foreshadowingList.value = res.data.data || []
+  if (res.data.code === 0) {
+    foreshadowingList.value = res.data.data || []
+  } else {
+    message.error(res.data.message || '加载伏笔失败')
+  }
 }
 
 watch(() => props.visible, (v) => { if (v) loadData() })
@@ -103,12 +107,16 @@ const handleCreate = async () => {
   }
   submitting.value = true
   try {
-    await createForeshadowing(props.novelId, {
+    const res = await createForeshadowing(props.novelId, {
       surface: form.surface,
       hiddenTruth: form.hiddenTruth || undefined,
       importance: form.importance,
       targetChapter: form.targetChapter || undefined,
     })
+    if (res.data.code !== 0) {
+      message.error(res.data.message || '创建失败')
+      return
+    }
     message.success('创建成功')
     showCreate.value = false
     form.surface = ''
@@ -125,17 +133,33 @@ const handleCreate = async () => {
 }
 
 const handleResolve = async (id: number) => {
-  await resolveForeshadowing(id)
-  message.success('已揭示')
-  loadData()
-  emit('refresh')
+  try {
+    const res = await resolveForeshadowing(id)
+    if (res.data.code !== 0) {
+      message.error(res.data.message || '揭示失败')
+      return
+    }
+    message.success('已揭示')
+    loadData()
+    emit('refresh')
+  } catch {
+    message.error('揭示失败')
+  }
 }
 
 const handleAbandon = async (id: number) => {
-  await abandonForeshadowing(id)
-  message.success('已放弃')
-  loadData()
-  emit('refresh')
+  try {
+    const res = await abandonForeshadowing(id)
+    if (res.data.code !== 0) {
+      message.error(res.data.message || '放弃失败')
+      return
+    }
+    message.success('已放弃')
+    loadData()
+    emit('refresh')
+  } catch {
+    message.error('放弃失败')
+  }
 }
 </script>
 

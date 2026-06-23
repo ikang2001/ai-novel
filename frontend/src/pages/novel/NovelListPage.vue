@@ -15,32 +15,9 @@
     </div>
 
     <div class="container">
-      <!-- 搜索筛选栏 -->
       <div class="filter-bar">
         <div class="filter-left">
-          <a-input-search
-            v-model:value="searchKeyword"
-            placeholder="搜索小说标题..."
-            style="width: 280px"
-            @search="handleSearch"
-            allow-clear
-            class="search-input"
-          >
-            <template #prefix><SearchOutlined class="search-icon" /></template>
-          </a-input-search>
-
-          <a-select
-            v-model:value="statusFilter"
-            placeholder="全部状态"
-            style="width: 120px"
-            allow-clear
-            @change="loadData"
-            class="status-select"
-          >
-            <a-select-option v-for="opt in NOVEL_STATUS_OPTIONS" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </a-select-option>
-          </a-select>
+          <span class="filter-hint">搜索、筛选功能本轮暂未开放，当前展示全部小说列表</span>
         </div>
         <div class="filter-right">
           <span class="total-count">共 {{ pagination.total }} 部小说</span>
@@ -136,21 +113,18 @@ import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import {
   PlusOutlined,
-  SearchOutlined,
   EyeOutlined,
   EditOutlined,
   DeleteOutlined,
   BookOutlined,
 } from '@ant-design/icons-vue'
 import { listNovel, deleteNovel } from '@/api/novelController'
-import { NOVEL_STATUS_TEXT_MAP, NOVEL_STATUS_OPTIONS, GENRE_OPTIONS, GENRE_COLOR_MAP } from '@/constants/novel'
+import { NOVEL_STATUS_TEXT_MAP, GENRE_OPTIONS, GENRE_COLOR_MAP } from '@/constants/novel'
 import { formatWordCount } from '@/utils/novel'
 import dayjs from 'dayjs'
 
 const router = useRouter()
 
-const searchKeyword = ref('')
-const statusFilter = ref('')
 const loading = ref(false)
 const dataSource = ref<API.NovelVO[]>([])
 const pagination = ref({
@@ -196,11 +170,6 @@ const loadData = async () => {
   } finally {
     loading.value = false
   }
-}
-
-const handleSearch = () => {
-  pagination.value.current = 1
-  loadData()
 }
 
 const handleTableChange = (pag: any) => {
@@ -295,6 +264,11 @@ onMounted(() => {
   gap: 12px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.filter-hint {
+  font-size: 13px;
+  color: #6B7280;
 }
 
 .total-count {

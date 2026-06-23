@@ -25,6 +25,18 @@ class NovelCreateRequest(BaseModel):
         populate_by_name = True
 
 
+class NovelIdeaEnhanceRequest(BaseModel):
+    """AI 完善小说核心创意请求"""
+
+    raw_idea: str = Field(..., alias="rawIdea", min_length=5, max_length=3000, description="作者原始创意")
+    genre: Optional[str] = Field(None, description="题材")
+    target_readers: Optional[str] = Field(None, alias="targetReaders", description="目标读者")
+    requirements: Optional[str] = Field(None, max_length=1200, description="额外要求")
+
+    class Config:
+        populate_by_name = True
+
+
 class NovelSettingUpdateRequest(BaseModel):
     """修改小说设定请求"""
 
@@ -55,6 +67,16 @@ class ChapterGenerateRequest(BaseModel):
     """章节生成请求"""
 
     outline: Dict[str, Any] = Field(..., description="本章大纲（JSON）")
+    chapter_id: Optional[int] = Field(None, alias="chapterId", description="目标章节 ID，不传则默认最新章节")
+    author_note: Optional[str] = Field(None, alias="authorNote", description="作者特别交代")
+
+    class Config:
+        populate_by_name = True
+
+
+class ChapterRegenerateRequest(BaseModel):
+    """章节重新生成请求"""
+
     author_note: Optional[str] = Field(None, alias="authorNote", description="作者特别交代")
 
     class Config:
@@ -187,9 +209,14 @@ class ChapterVO(BaseModel):
     chapter_number: int = Field(..., alias="chapterNumber")
     title: Optional[str] = None
     outline: Optional[Any] = None
+    chapter_memo: Optional[Any] = Field(None, alias="chapterMemo")
     content: Optional[str] = None
     summary: Optional[str] = None
+    ending_state: Optional[Any] = Field(None, alias="endingState")
+    quality_report: Optional[Any] = Field(None, alias="qualityReport")
     word_count: int = Field(0, alias="wordCount")
+    character_states: Optional[Any] = Field(None, alias="characterStates")
+    context_snapshot_id: Optional[int] = Field(None, alias="contextSnapshotId")
     status: str
     create_time: str = Field(..., alias="createTime")
     update_time: str = Field(..., alias="updateTime")
@@ -242,8 +269,12 @@ class ForeshadowingVO(BaseModel):
     keywords: Optional[List[str]] = None
     importance: int = Field(3)
     status: str = "active"
+    lifecycle_stage: Optional[str] = Field(None, alias="lifecycleStage")
     mention_history: Optional[List[Any]] = Field(None, alias="mentionHistory")
     last_mentioned_chapter: Optional[int] = Field(None, alias="lastMentionedChapter")
+    last_action_type: Optional[str] = Field(None, alias="lastActionType")
+    last_action_chapter: Optional[int] = Field(None, alias="lastActionChapter")
+    last_action_note: Optional[str] = Field(None, alias="lastActionNote")
     create_time: str = Field(..., alias="createTime")
     update_time: str = Field(..., alias="updateTime")
 
@@ -262,6 +293,23 @@ class SceneOutline(BaseModel):
     characters: Optional[List[str]] = None
     events: str
     emotional_tone: Optional[str] = Field(None, alias="emotionalTone")
+    entry_image: Optional[str] = Field(None, alias="entryImage")
+    exit_image: Optional[str] = Field(None, alias="exitImage")
+    information_gap: Optional[str] = Field(None, alias="informationGap")
+    purpose: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class HookOperation(BaseModel):
+    """本章伏笔操作"""
+
+    action: str = Field(..., description="open/advance/resolve/defer/plant")
+    foreshadowing_id: Optional[int] = Field(None, alias="foreshadowingId")
+    surface: Optional[str] = None
+    reason: Optional[str] = None
+    expected_payoff: Optional[str] = Field(None, alias="expectedPayoff")
 
     class Config:
         populate_by_name = True
@@ -276,6 +324,70 @@ class ChapterOutline(BaseModel):
     foreshadowing_to_use: Optional[List[str]] = Field(None, alias="foreshadowingToUse")
     foreshadowing_to_plant: Optional[List[str]] = Field(None, alias="foreshadowingToPlant")
     chapter_hook: Optional[str] = Field(None, alias="chapterHook")
+    chapter_task: Optional[str] = Field(None, alias="chapterTask")
+    reader_expectation: Optional[str] = Field(None, alias="readerExpectation")
+    previous_emotional_residue: Optional[str] = Field(None, alias="previousEmotionalResidue")
+    required_ending_change: Optional[str] = Field(None, alias="requiredEndingChange")
+    hook_operations: Optional[List[HookOperation]] = Field(None, alias="hookOperations")
+    prohibitions: Optional[List[str]] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class CharacterMotivationBeat(BaseModel):
+    """角色动机链"""
+
+    character: str
+    current_interest: Optional[str] = Field(None, alias="currentInterest")
+    pressure: Optional[str] = None
+    expected_action: Optional[str] = Field(None, alias="expectedAction")
+    constraint: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class ChapterMemo(ChapterOutline):
+    """章节备忘录，兼容旧章节大纲字段"""
+
+    information_gap: Optional[str] = Field(None, alias="informationGap")
+    opening_bridge: Optional[str] = Field(None, alias="openingBridge")
+    character_motivations: Optional[List[CharacterMotivationBeat]] = Field(None, alias="characterMotivations")
+    payoff_design: Optional[str] = Field(None, alias="payoffDesign")
+    scene_craft: Optional[List[str]] = Field(None, alias="sceneCraft")
+
+    class Config:
+        populate_by_name = True
+
+
+class ContextPackage(BaseModel):
+    """生成前结构化上下文包"""
+
+    version: str = "v1"
+    novel: Dict[str, Any]
+    target_chapter: Dict[str, Any] = Field(..., alias="targetChapter")
+    stable_memory: Dict[str, Any] = Field(default_factory=dict, alias="stableMemory")
+    recent_memory: Dict[str, Any] = Field(default_factory=dict, alias="recentMemory")
+    long_term_memory: Dict[str, Any] = Field(default_factory=dict, alias="longTermMemory")
+    hook_debt: List[Dict[str, Any]] = Field(default_factory=list, alias="hookDebt")
+    chapter_memo: Dict[str, Any] = Field(default_factory=dict, alias="chapterMemo")
+    rule_stack: List[str] = Field(default_factory=list, alias="ruleStack")
+    trace: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+class EndingState(BaseModel):
+    """章节结尾状态"""
+
+    final_image: Optional[str] = Field(None, alias="finalImage")
+    location: Optional[str] = None
+    emotional_residue: Optional[str] = Field(None, alias="emotionalResidue")
+    open_conflict: Optional[str] = Field(None, alias="openConflict")
+    reader_expectation: Optional[str] = Field(None, alias="readerExpectation")
+    character_states: Optional[List[Dict[str, Any]]] = Field(None, alias="characterStates")
 
     class Config:
         populate_by_name = True
@@ -290,6 +402,9 @@ class ArchiveResult(BaseModel):
     new_entities: Optional[List[Dict[str, Any]]] = Field(None, alias="newEntities")
     foreshadowing_updates: Optional[List[Dict[str, Any]]] = Field(None, alias="foreshadowingUpdates")
     timeline_events: Optional[List[Dict[str, Any]]] = Field(None, alias="timelineEvents")
+    ending_state: Optional[Dict[str, Any]] = Field(None, alias="endingState")
+    reader_expectation: Optional[str] = Field(None, alias="readerExpectation")
+    style_memory_updates: Optional[List[str]] = Field(None, alias="styleMemoryUpdates")
 
     class Config:
         populate_by_name = True
@@ -303,6 +418,13 @@ class ConsistencyIssue(BaseModel):
     description: str
     chapters: Optional[List[int]] = None
     suggestion: Optional[str] = None
+    paragraph_index: Optional[int] = Field(None, alias="paragraphIndex")
+    evidence_text: Optional[str] = Field(None, alias="evidenceText")
+    start_offset: Optional[int] = Field(None, alias="startOffset")
+    end_offset: Optional[int] = Field(None, alias="endOffset")
+
+    class Config:
+        populate_by_name = True
 
 
 class ConsistencyReport(BaseModel):
@@ -310,3 +432,40 @@ class ConsistencyReport(BaseModel):
 
     issues: List[ConsistencyIssue]
     summary: str
+
+
+class DraftAuditReport(BaseModel):
+    """单章草稿审稿报告"""
+
+    issues: List[ConsistencyIssue] = Field(default_factory=list)
+    summary: str = ""
+    should_revise: bool = Field(False, alias="shouldRevise")
+    revision_brief: Optional[str] = Field(None, alias="revisionBrief")
+
+    class Config:
+        populate_by_name = True
+
+
+class TaskEventVO(BaseModel):
+    """任务事件"""
+
+    type: str
+    data: Optional[Any] = None
+
+
+class TaskStatusVO(BaseModel):
+    """任务状态"""
+
+    task_id: str = Field(..., alias="taskId")
+    task_type: str = Field(..., alias="taskType")
+    status: str
+    novel_id: Optional[int] = Field(None, alias="novelId")
+    chapter_id: Optional[int] = Field(None, alias="chapterId")
+    chapter_number: Optional[int] = Field(None, alias="chapterNumber")
+    phase: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    events: List[TaskEventVO] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True

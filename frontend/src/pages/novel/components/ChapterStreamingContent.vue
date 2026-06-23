@@ -1,5 +1,5 @@
 <template>
-  <div class="streaming-content" ref="contentRef">
+  <div class="streaming-content" ref="contentRef" @scroll="handleScroll">
     <div v-if="chapterTitle" class="chapter-title">{{ chapterTitle }}</div>
     <div class="markdown-body" v-html="renderedContent"></div>
     <span v-if="isStreaming" class="typing-cursor">|</span>
@@ -17,6 +17,7 @@ const props = defineProps<{
 }>()
 
 const contentRef = ref<HTMLElement | null>(null)
+const shouldAutoScroll = ref(true)
 
 const renderedContent = computed(() => {
   if (!props.content) return ''
@@ -27,11 +28,17 @@ watch(
   () => props.content,
   async () => {
     await nextTick()
-    if (contentRef.value) {
+    if (contentRef.value && shouldAutoScroll.value) {
       contentRef.value.scrollTop = contentRef.value.scrollHeight
     }
   }
 )
+
+const handleScroll = () => {
+  const el = contentRef.value
+  if (!el) return
+  shouldAutoScroll.value = el.scrollHeight - el.scrollTop - el.clientHeight < 96
+}
 </script>
 
 <style scoped>

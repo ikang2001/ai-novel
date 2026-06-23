@@ -1,10 +1,13 @@
 """SSE Emitter 管理器"""
 
-import logging
 import asyncio
-from typing import Dict
+import json
+import logging
+from typing import Dict, Optional, Set
 
 from fastapi.responses import StreamingResponse
+from app.config import settings
+from app.utils.session import get_novel_task, get_novel_task_events
 
 logger = logging.getLogger(__name__)
 
@@ -13,10 +16,10 @@ class SseEmitterManager:
     """SSE Emitter 管理器"""
 
     def __init__(self):
-        # 存储所有的队列
-        self._queues: Dict[str, asyncio.Queue] = {}
+        # 每个任务支持多个连接订阅
+        self._queues: Dict[str, Set[asyncio.Queue]] = {}
 
-    def create_emitter(self, task_id: str) -> StreamingResponse:
+    def create_emitter(self, task_id: str, redis_backed: bool = False) -> StreamingResponse:
         """
         创建 SSE Emitter
 
@@ -26,10 +29,12 @@ class SseEmitterManager:
         Returns:
             StreamingResponse
         """
-        # 如果队列已存在，复用；否则创建新队列
-        if task_id not in self._queues:
-            self._queues[task_id] = asyncio.Queue()
-        queue = self._queues[task_id]
+        if redis_backed:
+            return self._create_redis_backed_emitter(task_id)
+
+        queue: asyncio.Queue = asyncio.Queue()
+        subscribers = self._queues.setdefault(task_id, set())
+        subscribers.add(queue)
 
         logger.info(f"SSE 连接已创建, taskId={task_id}")
 
@@ -51,7 +56,56 @@ class SseEmitterManager:
             except Exception as e:
                 logger.error(f"SSE 连接错误, taskId={task_id}, error={e}")
             finally:
+                subscribers = self._queues.get(task_id)
+                if subscribers:
+                    subscribers.discard(queue)
+                    if not subscribers:
+                        self._queues.pop(task_id, None)
                 logger.info(f"SSE 连接已关闭, taskId={task_id}")
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    def _create_redis_backed_emitter(self, task_id: str) -> StreamingResponse:
+        """Create an SSE stream that polls Redis task events.
+
+        This allows ARQ workers in another process to publish events through the
+        existing Redis task cache without sharing in-memory queues.
+        """
+
+        async def event_generator():
+            seen = 0
+            idle_after_terminal = 0
+            try:
+                while True:
+                    events = await get_novel_task_events(task_id)
+                    if seen > len(events):
+                        seen = 0
+                    for event in events[seen:]:
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    seen = len(events)
+
+                    task = await get_novel_task(task_id)
+                    if task and task.get("status") in {"completed", "failed"}:
+                        idle_after_terminal += 1
+                        if idle_after_terminal >= 2:
+                            break
+                    else:
+                        idle_after_terminal = 0
+                    await asyncio.sleep(settings.novel_sse_poll_interval_seconds)
+            except asyncio.CancelledError:
+                logger.info("Redis-backed SSE 连接被取消, taskId=%s", task_id)
+            except Exception as e:
+                logger.error("Redis-backed SSE 连接错误, taskId=%s, error=%s", task_id, e)
+            finally:
+                logger.info("Redis-backed SSE 连接已关闭, taskId=%s", task_id)
 
         return StreamingResponse(
             event_generator(),
@@ -71,13 +125,14 @@ class SseEmitterManager:
             task_id: 任务ID
             message: 消息内容
         """
-        queue = self._queues.get(task_id)
-        if queue is None:
-            logger.warning(f"SSE Emitter 不存在, taskId={task_id}")
+        queues = self._queues.get(task_id)
+        if not queues:
+            logger.debug(f"SSE Emitter 不存在, taskId={task_id}")
             return
         
         try:
-            queue.put_nowait(message)
+            for queue in list(queues):
+                queue.put_nowait(message)
             logger.debug(f"SSE 消息发送成功, taskId={task_id}")
         except Exception as e:
             logger.error(f"SSE 消息发送失败, taskId={task_id}, error={e}")
@@ -89,19 +144,17 @@ class SseEmitterManager:
         Args:
             task_id: 任务ID
         """
-        queue = self._queues.get(task_id)
-        if queue is None:
-            logger.warning(f"SSE Emitter 不存在, taskId={task_id}")
+        queues = self._queues.get(task_id)
+        if not queues:
+            logger.debug(f"SSE Emitter 不存在, taskId={task_id}")
             return
 
         try:
-            queue.put_nowait("__COMPLETE__")
+            for queue in list(queues):
+                queue.put_nowait("__COMPLETE__")
             logger.info(f"SSE 连接已完成, taskId={task_id}")
         except Exception as e:
             logger.error(f"SSE 连接完成失败, taskId={task_id}, error={e}")
-        finally:
-            # 立即清理队列（生成任务已结束，不再需要发送消息）
-            self._queues.pop(task_id, None)
     
     def exists(self, task_id: str) -> bool:
         """
@@ -113,7 +166,7 @@ class SseEmitterManager:
         Returns:
             是否存在
         """
-        return task_id in self._queues
+        return bool(self._queues.get(task_id))
 
 
 # 全局单例

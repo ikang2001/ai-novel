@@ -121,8 +121,8 @@
               <a-button block @click="handleConsistency" :loading="checking">
                 连贯性检查
               </a-button>
-              <a-button block @click="handleExport">
-                导出小说
+              <a-button block disabled>
+                导出功能暂未开放
               </a-button>
             </a-space>
           </a-card>
@@ -184,7 +184,7 @@ import {
   PlusOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons-vue'
-import { getNovel, listChapters, listCharacters, listForeshadowing, checkConsistency, exportNovel, planChapter } from '@/api/novelController'
+import { getNovel, listChapters, listCharacters, listForeshadowing, checkConsistency, planChapter } from '@/api/novelController'
 import { GENRE_OPTIONS, GENRE_COLOR_MAP, ROLE_TYPE_TEXT_MAP, ROLE_TYPE_COLOR_MAP } from '@/constants/novel'
 import { formatWordCount } from '@/utils/novel'
 import ChapterList from './components/ChapterList.vue'
@@ -317,27 +317,12 @@ const handleConsistency = async () => {
 }
 
 const handleGoToChapter = (chapterNumber: number) => {
-  // 查找章节
   const chapter = chapters.value.find(c => c.chapterNumber === chapterNumber)
   if (chapter) {
-    // 跳转到写作页面并选中该章节
-    router.push(`/novel/${novelId}/write?chapterId=${chapter.id}`)
+    router.push(`/novel/${novelId}/write?chapter=${chapter.id}`)
     showConsistencyReport.value = false
   } else {
     message.warning(`未找到第${chapterNumber}章`)
-  }
-}
-
-const handleExport = async () => {
-  try {
-    const res = await exportNovel(novelId, { format: 'docx' })
-    if (res.data.code === 0) {
-      message.success('导出成功')
-    } else {
-      message.error(res.data.message || '导出功能暂未实现')
-    }
-  } catch (e) {
-    message.error('导出失败')
   }
 }
 

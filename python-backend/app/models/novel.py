@@ -53,8 +53,11 @@ class Chapter(Base):
 
     # 内容
     outline = Column(Text, nullable=True, comment="本章大纲（JSON）")
+    chapter_memo = Column("chapterMemo", Text, nullable=True, comment="章节备忘录/写作意图（JSON）")
     content = Column(Text, nullable=True, comment="正文（Markdown）")
     summary = Column(Text, nullable=True, comment="本章摘要（归档时生成，约150字）")
+    ending_state = Column("endingState", Text, nullable=True, comment="章节结尾状态快照（JSON）")
+    quality_report = Column("qualityReport", Text, nullable=True, comment="生成后质量审稿报告（JSON）")
     word_count = Column("wordCount", Integer, nullable=False, default=0, comment="字数")
 
     # 归档数据
@@ -136,10 +139,20 @@ class Foreshadowing(Base):
 
     # 状态
     status = Column(String(20), nullable=False, default="active", comment="状态：active/resolved/abandoned")
+    lifecycle_stage = Column(
+        "lifecycleStage",
+        String(30),
+        nullable=False,
+        default="planted",
+        comment="内部生命周期：planted/open/progressing/near_payoff/pressured",
+    )
 
     # 呼应记录
     mention_history = Column("mentionHistory", Text, nullable=True, comment="历史呼应记录（JSON）")
     last_mentioned_chapter = Column("lastMentionedChapter", Integer, nullable=True, comment="最后一次提及的章节号")
+    last_action_type = Column("lastActionType", String(30), nullable=True, comment="最近动作类型")
+    last_action_chapter = Column("lastActionChapter", Integer, nullable=True, comment="最近动作章节号")
+    last_action_note = Column("lastActionNote", Text, nullable=True, comment="最近动作说明")
 
     # 时间
     create_time = Column("createTime", DateTime, nullable=False, default=func.now(), comment="创建时间")
@@ -172,4 +185,35 @@ class ContextSnapshot(Base):
     novel_id = Column("novelId", BigInteger, nullable=False, comment="小说ID")
     chapter_id = Column("chapterId", BigInteger, nullable=False, comment="章节ID")
     context_data = Column("contextData", Text, nullable=True, comment="生成本章时注入的完整上下文（JSON）")
+    prompt_data = Column("promptData", Text, nullable=True, comment="最终写作 Prompt 和规则栈（JSON）")
+    trace_data = Column("traceData", Text, nullable=True, comment="上下文检索/裁剪追踪信息（JSON）")
+    version = Column(String(20), nullable=False, default="v1", comment="上下文包版本")
+    create_time = Column("createTime", DateTime, nullable=False, default=func.now(), comment="创建时间")
+
+
+class NovelState(Base):
+    """小说运行状态表"""
+
+    __tablename__ = "novel_state"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, comment="id")
+    novel_id = Column("novelId", BigInteger, nullable=False, comment="小说ID")
+    state_type = Column("stateType", String(50), nullable=False, comment="状态类型")
+    state_data = Column("stateData", Text, nullable=True, comment="状态内容（JSON）")
+    source_chapter_id = Column("sourceChapterId", BigInteger, nullable=True, comment="来源章节ID")
+    create_time = Column("createTime", DateTime, nullable=False, default=func.now(), comment="创建时间")
+    update_time = Column("updateTime", DateTime, nullable=False, default=func.now(), onupdate=func.now(), comment="更新时间")
+
+
+class ChapterVersion(Base):
+    """章节版本记录表"""
+
+    __tablename__ = "chapter_version"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, comment="id")
+    novel_id = Column("novelId", BigInteger, nullable=False, comment="小说ID")
+    chapter_id = Column("chapterId", BigInteger, nullable=False, comment="章节ID")
+    version_type = Column("versionType", String(30), nullable=False, comment="版本类型")
+    content = Column(Text, nullable=True, comment="版本正文")
+    meta_data = Column("metaData", Text, nullable=True, comment="版本元数据（JSON）")
     create_time = Column("createTime", DateTime, nullable=False, default=func.now(), comment="创建时间")

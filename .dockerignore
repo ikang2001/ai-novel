@@ -2,14 +2,21 @@
 # Docker 构建忽略文件
 # ========================================
 
-# Maven
-target/
-pom.xml.tag
-pom.xml.releaseBackup
-pom.xml.versionsBackup
-pom.xml.next
-release.properties
-dependency-reduced-pom.xml
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
 
 # IDE
 .idea/
@@ -24,10 +31,18 @@ dependency-reduced-pom.xml
 .gitignore
 .gitattributes
 
+# Env
+.env
+*.env
+python-backend/.env
+
 # Docker
 Dockerfile
 .dockerignore
 docker-compose*.yml
+
+# Local services
+.local-services/
 
 # 文档
 README.md
@@ -45,7 +60,7 @@ logs/
 *~
 
 # 测试
-src/test/
+python-backend/tests/.pytest_cache/
 
 # CI/CD
 .github/

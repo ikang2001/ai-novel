@@ -3,13 +3,15 @@
 import json
 import logging
 import re
+import inspect
+import time
 from typing import Optional, List, Dict, Any, Callable
-
-from openai import AsyncOpenAI
 
 from app.config import settings
 from app.constants.novel_prompt import NovelPromptConstant
 from app.services.context_builder import ContextBuilder
+from app.services.llm_client import create_chat_client, get_chat_model
+from app.services.prompt_crafter import PromptCrafter
 from app.services.novel_service import NovelService
 from app.services.character_service import CharacterService
 from app.services.foreshadowing_service import ForeshadowingService
@@ -28,13 +30,32 @@ class NovelAgentService:
         self.character_service = character_service
         self.foreshadowing_service = foreshadowing_service
         self.context_builder = context_builder
+        self.prompt_crafter = PromptCrafter()
 
-        # LLM 客户端（DashScope 兼容 OpenAI 接口）
-        self.client = AsyncOpenAI(
-            api_key=settings.dashscope_api_key,
-            base_url=settings.dashscope_base_url
-        )
-        self.model = settings.dashscope_model
+        self.client = create_chat_client()
+        self.model = get_chat_model()
+
+    # ========== Agent 0：创意孵化助手 ==========
+
+    async def agent0_enhance_core_idea(
+        self,
+        raw_idea: str,
+        genre: Optional[str] = None,
+        target_readers: Optional[str] = None,
+        requirements: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """把作者的粗略点子完善成可用于开书的核心创意方案。"""
+        prompt = NovelPromptConstant.AGENT0_IDEA_ENHANCE_PROMPT
+        prompt = prompt.replace("{raw_idea}", raw_idea.strip())
+        prompt = prompt.replace("{genre}", genre or "未指定")
+        prompt = prompt.replace("{target_readers}", target_readers or "通用")
+        prompt = prompt.replace("{requirements}", requirements or "无")
+
+        content = await self._call_llm(prompt, stage="plan")
+        result = self._extract_json_from_response(content)
+        normalized = self._normalize_idea_enhancement(result, raw_idea)
+        logger.info("Agent0 核心创意完善完成, raw_len=%s", len(raw_idea or ""))
+        return normalized
 
     # ========== Agent 1：设定助手 ==========
 
@@ -55,7 +76,7 @@ class NovelAgentService:
         prompt = prompt.replace("{core_idea}", core_idea or "无")
         prompt = prompt.replace("{initial_characters_section}", initial_characters_section)
 
-        content = await self._call_llm(prompt)
+        content = await self._call_llm(prompt, stage="plan")
         result = self._extract_json_from_response(content)
         logger.info("Agent1 设定生成成功, title=%s", title)
         return result
@@ -69,7 +90,7 @@ class NovelAgentService:
 
         prompt = NovelPromptConstant.AGENT2_STYLE_ANALYZE_PROMPT.replace("{samples}", truncated)
 
-        content = await self._call_llm(prompt)
+        content = await self._call_llm(prompt, stage="plan")
         result = self._extract_json_from_response(content)
         logger.info("Agent2 风格分析完成")
         return result
@@ -102,7 +123,7 @@ class NovelAgentService:
         # 读取活跃伏笔
         active_fs = await self.foreshadowing_service.get_active_foreshadowing(novel_id)
         fs_text = "\n".join(
-            f"- {fs['surface']}" + (f"（真相：{fs['hidden_truth']}）" if fs.get('hidden_truth') else "")
+            f"- {fs['surface']}" + (f"（真相：{fs['hiddenTruth']}）" if fs.get('hiddenTruth') else "")
             for fs in active_fs[:5]
         ) if active_fs else "暂无"
 
@@ -123,7 +144,7 @@ class NovelAgentService:
         prompt = prompt.replace("{active_foreshadowing}", fs_text)
         prompt = prompt.replace("{author_intent_section}", author_intent_section)
 
-        content = await self._call_llm(prompt)
+        content = await self._call_llm(prompt, stage="plan")
         result = self._extract_json_from_response(content)
         logger.info("Agent3 大纲生成成功, novel_id=%s", novel_id)
         return result
@@ -144,7 +165,7 @@ class NovelAgentService:
         prompt = prompt.replace("{chapter_number}", str(chapter_number))
         prompt = prompt.replace("{recent_summaries}", summaries_text)
 
-        content = await self._call_llm(prompt)
+        content = await self._call_llm(prompt, stage="plan")
         result = self._extract_json_from_response(content)
         if not isinstance(result, list):
             result = [result] if isinstance(result, dict) else []
@@ -153,61 +174,179 @@ class NovelAgentService:
     # ========== Agent 4：写作助手 ==========
 
     async def agent4_write_chapter(self, novel_id: int,
-                                   chapter_outline: str,
+                                   chapter_outline: Any,
                                    author_note: Optional[str] = None,
-                                   stream_handler: Optional[Callable[[str], None]] = None) -> str:
-        """写作助手：生成一章约 5000 字的小说正文
+                                   stream_handler: Optional[Callable[[str], None]] = None,
+                                   chapter_id: Optional[int] = None,
+                                   chapter_number: Optional[int] = None) -> str:
+        """兼容旧调用：返回质量闭环后的最终正文。"""
+        result = await self.agent4_write_chapter_with_quality_loop(
+            novel_id=novel_id,
+            chapter_outline=chapter_outline,
+            author_note=author_note,
+            stream_handler=stream_handler,
+            chapter_id=chapter_id,
+            chapter_number=chapter_number,
+        )
+        return result["content"]
 
-        这是最核心的 Agent。
-        1. 调用 context_builder 组装三层记忆上下文
-        2. 拼接完整的 prompt
-        3. 流式调用 LLM
-        """
-        # 读取风格指南（用于风格约束）
-        novel = await self.novel_service.get_novel(novel_id)
-        style_guide = novel.get("style_guide") if novel else None
+    async def agent4_write_chapter_with_quality_loop(
+        self,
+        novel_id: int,
+        chapter_outline: Any,
+        author_note: Optional[str] = None,
+        stream_handler: Optional[Callable[[str], None]] = None,
+        chapter_id: Optional[int] = None,
+        chapter_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """写作助手：上下文包 -> 九层 prompt -> 初稿 -> 审稿 -> 最多一次修订。"""
+        context_package = await self.context_builder.build_package(
+            novel_id=novel_id,
+            chapter_outline=chapter_outline,
+            chapter_id=chapter_id,
+            chapter_number=chapter_number,
+        )
+        prompt_data = self.prompt_crafter.craft_chapter_prompt(context_package, author_note)
+        prompt = prompt_data["prompt"]
 
-        # 组装三层记忆上下文
-        context = await self.context_builder.build(novel_id, chapter_outline)
-
-        # 构建风格约束部分
-        style_constraints = ""
-        if style_guide:
-            if isinstance(style_guide, str):
-                try:
-                    style_guide = json.loads(style_guide)
-                except json.JSONDecodeError:
-                    pass
-            if isinstance(style_guide, dict):
-                guide_text = self._format_dict_brief(style_guide)
-            else:
-                guide_text = str(style_guide)
-            style_constraints = NovelPromptConstant.AGENT4_STYLE_CONSTRAINTS_SECTION.replace(
-                "{style_guide}", guide_text
-            )
-
-        # 构建作者交代部分
-        author_note_section = ""
-        if author_note:
-            author_note_section = NovelPromptConstant.AGENT4_AUTHOR_NOTE_SECTION.replace(
-                "{author_note}", author_note
-            )
-
-        # 拼接完整 prompt
-        prompt = NovelPromptConstant.AGENT4_CHAPTER_WRITE_PROMPT
-        prompt = prompt.replace("{context}", context)
-        prompt = prompt.replace("{style_constraints}", style_constraints)
-        prompt = prompt.replace("{outline}", chapter_outline)
-        prompt = prompt.replace("{author_note_section}", author_note_section)
-
-        # 流式调用
         if stream_handler:
-            content = await self._call_llm_streaming(prompt, stream_handler)
+            draft_content = await self._call_llm_streaming(prompt, stream_handler, stage="write")
         else:
-            content = await self._call_llm(prompt)
+            draft_content = await self._call_llm(prompt, stage="write")
 
-        logger.info("Agent4 章节生成完成, novel_id=%s, 字数=%d", novel_id, len(content))
-        return content
+        audit_report = await self.agent4_audit_draft(context_package, draft_content)
+        final_content = draft_content
+        revised = False
+        if self._audit_requires_revision(audit_report):
+            try:
+                final_content = await self.agent4_revise_draft(context_package, draft_content, audit_report)
+                revised = True
+            except Exception as exc:
+                logger.warning("自动修订失败，保留初稿, novel_id=%s, chapter=%s, error=%s", novel_id, chapter_number, exc)
+                audit_report.setdefault("issues", []).append({
+                    "type": "revision_failed",
+                    "severity": "low",
+                    "description": "自动修订失败，系统已保留 AI 初稿。",
+                    "chapters": [chapter_number] if chapter_number else [],
+                    "suggestion": str(exc),
+                })
+
+        logger.info(
+            "Agent4 章节质量闭环完成, novel_id=%s, chapter=%s, draft=%d, final=%d, revised=%s",
+            novel_id,
+            chapter_number,
+            len(draft_content),
+            len(final_content),
+            revised,
+        )
+        return {
+            "content": final_content,
+            "draftContent": draft_content,
+            "auditReport": audit_report,
+            "revised": revised,
+            "contextPackage": context_package,
+            "promptData": prompt_data,
+        }
+
+    async def agent4_audit_draft(self, context_package: Dict[str, Any],
+                                 draft_content: str) -> Dict[str, Any]:
+        """审稿助手：检查单章草稿。"""
+        prompt = self.prompt_crafter.craft_audit_prompt(context_package, draft_content[:12000])
+        try:
+            content = await self._call_llm(prompt, stage="audit")
+            result = self._extract_json_from_response(content)
+        except Exception as exc:
+            logger.warning("草稿审稿失败，跳过自动修订, error=%s", exc)
+            return {
+                "issues": [{
+                    "type": "audit_failed",
+                    "severity": "low",
+                    "description": "草稿审稿失败，系统已保留生成正文。",
+                    "chapters": [],
+                    "suggestion": str(exc),
+                }],
+                "summary": "审稿失败，已降级保存草稿",
+                "shouldRevise": False,
+                "revisionBrief": "",
+            }
+        return self._normalize_audit_report(result, draft_content)
+
+    async def agent4_revise_draft(self, context_package: Dict[str, Any],
+                                  draft_content: str,
+                                  audit_report: Dict[str, Any]) -> str:
+        """修订助手：根据审稿报告修订正文。"""
+        prompt = self.prompt_crafter.craft_revision_prompt(
+            context_package=context_package,
+            draft_content=draft_content,
+            audit_report=audit_report,
+        )
+        return await self._call_llm(prompt, stage="revise")
+
+    def _audit_requires_revision(self, audit_report: Dict[str, Any]) -> bool:
+        """Only high/medium issues trigger the single automatic revision pass."""
+        if audit_report.get("shouldRevise") is True:
+            return True
+        for issue in audit_report.get("issues") or []:
+            if str(issue.get("severity", "")).lower() in {"high", "medium"}:
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_audit_report(result: Any, draft_content: str = "") -> Dict[str, Any]:
+        """Normalize audit report and enrich issue paragraph positions when possible."""
+        if not isinstance(result, dict):
+            result = {}
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", draft_content or "") if part.strip()]
+        normalized_issues = []
+        for raw_issue in result.get("issues") or []:
+            if not isinstance(raw_issue, dict):
+                continue
+            issue = dict(raw_issue)
+            issue["type"] = str(issue.get("type") or "issue")
+            issue["severity"] = str(issue.get("severity") or "low").lower()
+            issue["description"] = str(issue.get("description") or "")
+            issue["suggestion"] = issue.get("suggestion") or ""
+
+            evidence = issue.get("evidenceText") or issue.get("evidence_text") or ""
+            paragraph_index = issue.get("paragraphIndex") or issue.get("paragraph_index")
+            start_offset = issue.get("startOffset") or issue.get("start_offset")
+            end_offset = issue.get("endOffset") or issue.get("end_offset")
+
+            try:
+                paragraph_index = int(paragraph_index) if paragraph_index not in (None, "") else None
+            except (TypeError, ValueError):
+                paragraph_index = None
+
+            if not evidence and paragraph_index and 1 <= paragraph_index <= len(paragraphs):
+                evidence = paragraphs[paragraph_index - 1][:160]
+
+            if evidence and not paragraph_index:
+                for index, paragraph in enumerate(paragraphs, start=1):
+                    if evidence in paragraph:
+                        paragraph_index = index
+                        break
+
+            if evidence and (start_offset in (None, "") or end_offset in (None, "")):
+                found = (draft_content or "").find(evidence)
+                if found >= 0:
+                    start_offset = found
+                    end_offset = found + len(evidence)
+
+            for key, value in (("paragraphIndex", paragraph_index), ("startOffset", start_offset), ("endOffset", end_offset)):
+                try:
+                    issue[key] = int(value) if value not in (None, "") else None
+                except (TypeError, ValueError):
+                    issue[key] = None
+            issue["evidenceText"] = str(evidence)[:240] if evidence else ""
+            normalized_issues.append(issue)
+
+        return {
+            **result,
+            "issues": normalized_issues,
+            "summary": result.get("summary") or "未发现明显问题",
+            "shouldRevise": bool(result.get("shouldRevise", result.get("should_revise", False))),
+            "revisionBrief": result.get("revisionBrief") or result.get("revision_brief") or "",
+        }
 
     # ========== Agent 5：归档助手 ==========
 
@@ -216,7 +355,7 @@ class NovelAgentService:
         # 读取当前角色列表
         all_chars = await self.character_service.get_all_characters(novel_id)
         chars_text = json.dumps(
-            [{"name": c["name"], "role_type": c.get("role_type"), "status": c.get("current_status")}
+            [{"name": c["name"], "roleType": c.get("roleType"), "status": c.get("currentStatus")}
              for c in all_chars],
             ensure_ascii=False
         ) if all_chars else "暂无"
@@ -237,7 +376,7 @@ class NovelAgentService:
         prompt = prompt.replace("{active_foreshadowing}", fs_text)
         prompt = prompt.replace("{chapter_content}", truncated_content)
 
-        content = await self._call_llm(prompt)
+        content = await self._call_llm(prompt, stage="archive")
         result = self._extract_json_from_response(content)
         logger.info("Agent5 归档分析完成, novel_id=%s", novel_id)
         return result
@@ -250,7 +389,7 @@ class NovelAgentService:
         """
         # 1. 更新章节摘要和字数
         summary = result.get("summary", "")
-        word_count = result.get("word_count", 0)
+        word_count = result.get("wordCount", 0)
         if summary:
             await self.novel_service.update_chapter_summary(chapter_id, summary)
         if word_count > 0:
@@ -260,24 +399,62 @@ class NovelAgentService:
                 {"wc": word_count, "id": chapter_id},
             )
 
-        # 更新小说总字数
-        novel = await self.novel_service.get_novel(novel_id)
-        if novel:
-            total = novel.get("totalWordCount", 0) + word_count
-            await self.novel_service.update_novel_word_count(novel_id, total)
+        ending_state = result.get("endingState") or result.get("ending_state") or {}
+        if isinstance(ending_state, dict) and ending_state:
+            await self.novel_service.update_chapter_ending_state(chapter_id, ending_state)
+            await self.novel_service.upsert_novel_state(
+                novel_id,
+                "current_state",
+                ending_state,
+                source_chapter_id=chapter_id,
+            )
+            if ending_state.get("readerExpectation"):
+                await self.novel_service.upsert_novel_state(
+                    novel_id,
+                    "reader_expectation",
+                    {"text": ending_state.get("readerExpectation")},
+                    source_chapter_id=chapter_id,
+                )
+            if ending_state.get("characterStates"):
+                await self.novel_service.update_chapter_character_states(
+                    chapter_id,
+                    {"characters": ending_state.get("characterStates")},
+                )
+
+        reader_expectation = result.get("readerExpectation") or result.get("reader_expectation")
+        if reader_expectation:
+            await self.novel_service.upsert_novel_state(
+                novel_id,
+                "reader_expectation",
+                {"text": reader_expectation},
+                source_chapter_id=chapter_id,
+            )
+
+        style_updates = result.get("styleMemoryUpdates") or result.get("style_memory_updates") or []
+        if style_updates:
+            await self.novel_service.upsert_novel_state(
+                novel_id,
+                "style_memory",
+                {"updates": style_updates},
+                source_chapter_id=chapter_id,
+            )
 
         # 2. 处理角色更新
-        for char_update in result.get("character_updates", []):
+        for char_update in result.get("characterUpdates", []):
             name = char_update.get("name")
             action = char_update.get("action")
             updates = char_update.get("updates", {})
+
+            if not name or action not in {"create", "update"}:
+                logger.warning("跳过无效角色更新, novel_id=%s, chapter_id=%s, payload=%s", novel_id, chapter_id, char_update)
+                continue
 
             if action == "create":
                 # 新角色
                 new_char_id = await self.character_service.create_character(
                     novel_id=novel_id,
                     name=name,
-                    role_type=updates.get("role_type", "minor"),
+                    role_type=updates.get("roleType", "minor"),
                     appearance=updates.get("appearance"),
                     personality=updates.get("personality"),
                     skills=updates.get("skills"),
@@ -288,17 +465,21 @@ class NovelAgentService:
                 if char:
                     await self.character_service.update_character_state(
                         character_id=char["id"],
-                        current_location=updates.get("current_location"),
-                        current_status=updates.get("current_status"),
-                        new_details=updates.get("new_details"),
+                        current_location=updates.get("currentLocation"),
+                        current_status=updates.get("currentStatus"),
+                        new_details=updates.get("newDetails"),
                     )
                     await self.character_service.set_last_appearance(char["id"], chapter_id)
 
         # 3. 处理新实体
-        for entity in result.get("new_entities", []):
+        for entity in result.get("newEntities", []):
             entity_type = entity.get("type")
             name = entity.get("name")
             details = entity.get("details", {})
+
+            if not name:
+                logger.warning("跳过无效新实体, novel_id=%s, chapter_id=%s, payload=%s", novel_id, chapter_id, entity)
+                continue
 
             if entity_type == "character":
                 # 检查是否已存在
@@ -307,37 +488,87 @@ class NovelAgentService:
                     await self.character_service.create_character(
                         novel_id=novel_id,
                         name=name,
-                        role_type=details.get("role_type", "minor"),
+                        role_type=details.get("roleType", "minor"),
                         appearance=details.get("appearance"),
                         personality=details.get("personality"),
                     )
 
         # 4. 处理伏笔更新
-        for fs_update in result.get("foreshadowing_updates", []):
+        for fs_update in result.get("foreshadowingUpdates", []):
             action = fs_update.get("action")
 
+            note = fs_update.get("note") or fs_update.get("lastActionNote")
+            lifecycle_stage = fs_update.get("lifecycleStage") or fs_update.get("lifecycle_stage")
+
             if action == "plant":
+                surface = fs_update.get("surface", "")
+                if not surface:
+                    logger.warning("跳过无效伏笔创建, novel_id=%s, chapter_id=%s, payload=%s", novel_id, chapter_id, fs_update)
+                    continue
                 # 新埋伏笔
-                await self.foreshadowing_service.create_foreshadowing(
+                new_fs_id = await self.foreshadowing_service.create_foreshadowing(
                     novel_id=novel_id,
-                    surface=fs_update.get("surface", ""),
-                    hidden_truth=fs_update.get("hidden_truth"),
+                    surface=surface,
+                    hidden_truth=fs_update.get("hiddenTruth"),
                     category=fs_update.get("category"),
-                    related_characters=fs_update.get("related_characters"),
+                    related_characters=fs_update.get("relatedCharacters"),
                     keywords=fs_update.get("keywords"),
+                    target_chapter=fs_update.get("targetChapter") or fs_update.get("target_chapter"),
                     importance=fs_update.get("importance", 3),
                     planted_chapter_id=chapter_id,
                 )
+                if lifecycle_stage:
+                    await self.foreshadowing_service.update_lifecycle(
+                        new_fs_id,
+                        lifecycle_stage,
+                        action_type="plant",
+                        chapter_number=chapter_number,
+                        note=note or "本章新埋伏笔",
+                    )
             elif action == "resolve":
-                fs_id = fs_update.get("foreshadowing_id")
+                fs_id = fs_update.get("foreshadowingId")
                 if fs_id:
                     await self.foreshadowing_service.resolve_foreshadowing(fs_id, chapter_id)
-            elif action == "mention":
-                fs_id = fs_update.get("foreshadowing_id")
+                    if lifecycle_stage:
+                        await self.foreshadowing_service.update_lifecycle(
+                            fs_id,
+                            lifecycle_stage,
+                            action_type="resolve",
+                            chapter_number=chapter_number,
+                            note=note or "本章揭示伏笔",
+                        )
+                else:
+                    logger.warning("跳过无效伏笔揭示, novel_id=%s, chapter_id=%s, payload=%s", novel_id, chapter_id, fs_update)
+            elif action in {"mention", "advance"}:
+                fs_id = fs_update.get("foreshadowingId")
                 if fs_id:
                     await self.foreshadowing_service.record_mention(
-                        fs_id, chapter_id, chapter_number
+                        fs_id, chapter_id, chapter_number, context=note or fs_update.get("surface")
                     )
+                    if lifecycle_stage:
+                        await self.foreshadowing_service.update_lifecycle(
+                            fs_id,
+                            lifecycle_stage,
+                            action_type=action,
+                            chapter_number=chapter_number,
+                            note=note or "本章推进伏笔",
+                        )
+                else:
+                    logger.warning("跳过无效伏笔呼应, novel_id=%s, chapter_id=%s, payload=%s", novel_id, chapter_id, fs_update)
+            elif action == "defer":
+                fs_id = fs_update.get("foreshadowingId")
+                if fs_id:
+                    await self.foreshadowing_service.update_lifecycle(
+                        fs_id,
+                        lifecycle_stage or "open",
+                        action_type="defer",
+                        chapter_number=chapter_number,
+                        note=note or "本章明确暂缓",
+                    )
+                else:
+                    logger.warning("跳过无效伏笔暂缓, novel_id=%s, chapter_id=%s, payload=%s", novel_id, chapter_id, fs_update)
+            elif action:
+                logger.warning("未知伏笔动作, novel_id=%s, chapter_id=%s, payload=%s", novel_id, chapter_id, fs_update)
 
         logger.info("归档结果应用完成, novel_id=%s, chapter_id=%s", novel_id, chapter_id)
 
@@ -368,7 +599,7 @@ class NovelAgentService:
         all_fs = await self.foreshadowing_service.get_all_foreshadowing(novel_id)
         fs_text = "\n".join(
             f"- [{fs['status']}] {fs['surface']}"
-            + (f"（真相：{fs['hidden_truth']}）" if fs.get('hidden_truth') else "")
+            + (f"（真相：{fs['hiddenTruth']}）" if fs.get('hiddenTruth') else "")
             for fs in all_fs
         ) or "暂无伏笔"
 
@@ -379,7 +610,7 @@ class NovelAgentService:
         prompt = prompt.replace("{all_characters}", chars_text[:3000])
         prompt = prompt.replace("{all_foreshadowing}", fs_text[:2000])
 
-        content = await self._call_llm(prompt)
+        content = await self._call_llm(prompt, stage="audit")
         result = self._extract_json_from_response(content)
         logger.info("Agent6 连贯性检查完成, novel_id=%s", novel_id)
         return result
@@ -394,7 +625,7 @@ class NovelAgentService:
             "{summaries}", summaries_text
         ).replace("{target_words}", "500")
 
-        content = await self._call_llm(prompt)
+        content = await self._call_llm(prompt, stage="archive")
         logger.info("卷摘要生成完成, novel_id=%s, volume=%d", novel_id, volume_number)
         return content
 
@@ -409,7 +640,7 @@ class NovelAgentService:
             "{summaries}", summaries_text
         ).replace("{target_words}", "800")
 
-        content = await self._call_llm(prompt)
+        content = await self._call_llm(prompt, stage="archive")
 
         # 保存到数据库
         await self.novel_service.update_synopsis(novel_id, content)
@@ -418,10 +649,11 @@ class NovelAgentService:
 
     # ========== LLM 调用封装 ==========
 
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str, stage: Optional[str] = None) -> str:
         """非流式调用 LLM"""
+        model = get_chat_model(stage)
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
         )
         if not response.choices:
@@ -429,16 +661,37 @@ class NovelAgentService:
         return response.choices[0].message.content
 
     async def _call_llm_streaming(self, prompt: str,
-                                  stream_handler: Optional[Callable[[str], None]] = None) -> str:
+                                  stream_handler: Optional[Callable[[str], None]] = None,
+                                  stage: Optional[str] = None) -> str:
         """流式调用 LLM
 
         每收到一个 chunk，就通过 stream_handler 推送给前端。
         同时拼接所有 chunk，最终返回完整文本。
         """
         content_builder = []
+        stream_buffer: List[str] = []
+        stream_buffer_length = 0
+        last_flush_time = time.monotonic()
 
+        async def flush_stream_buffer(force: bool = False) -> None:
+            nonlocal stream_buffer_length, last_flush_time
+            if not stream_handler or not stream_buffer:
+                return
+            if not force and stream_buffer_length < settings.novel_stream_min_chunk_chars:
+                return
+
+            content = "".join(stream_buffer)
+            stream_buffer.clear()
+            stream_buffer_length = 0
+            last_flush_time = time.monotonic()
+
+            result = stream_handler(content)
+            if inspect.isawaitable(result):
+                await result
+
+        model = get_chat_model(stage)
         stream = await self.client.chat.completions.create(
-            model=self.model,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             stream=True,
         )
@@ -451,7 +704,22 @@ class NovelAgentService:
                 continue
             content_builder.append(delta.content)
             if stream_handler:
-                stream_handler(delta.content)
+                stream_buffer.append(delta.content)
+                stream_buffer_length += len(delta.content)
+                now = time.monotonic()
+                reached_size = stream_buffer_length >= settings.novel_stream_chunk_chars
+                reached_time = (
+                    stream_buffer_length >= settings.novel_stream_min_chunk_chars
+                    and now - last_flush_time >= settings.novel_stream_flush_interval_seconds
+                )
+                reached_boundary = (
+                    stream_buffer_length >= settings.novel_stream_min_chunk_chars
+                    and delta.content.endswith(("。", "！", "？", "；", "\n", ".", "!", "?"))
+                )
+                if reached_size or reached_time or reached_boundary:
+                    await flush_stream_buffer()
+
+        await flush_stream_buffer(force=True)
 
         return "".join(content_builder)
 
@@ -527,3 +795,46 @@ class NovelAgentService:
             else:
                 lines.append(f"- {display}：{value}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_idea_enhancement(result: Dict[str, Any], raw_idea: str) -> Dict[str, Any]:
+        normalized = dict(result or {})
+        normalized["logline"] = (
+            normalized.get("logline")
+            or normalized.get("oneLinePitch")
+            or normalized.get("one_line_pitch")
+            or ""
+        )
+        normalized["enhancedCoreIdea"] = (
+            normalized.get("enhancedCoreIdea")
+            or normalized.get("enhanced_core_idea")
+            or normalized.get("coreIdea")
+            or normalized.get("core_idea")
+            or raw_idea
+        )
+        normalized["titleSuggestions"] = (
+            normalized.get("titleSuggestions")
+            or normalized.get("title_suggestions")
+            or []
+        )
+        normalized["genrePositioning"] = (
+            normalized.get("genrePositioning")
+            or normalized.get("genre_positioning")
+            or ""
+        )
+        normalized["protagonistDesign"] = (
+            normalized.get("protagonistDesign")
+            or normalized.get("protagonist_design")
+            or {}
+        )
+        normalized["powerSystem"] = (
+            normalized.get("powerSystem")
+            or normalized.get("power_system")
+            or {}
+        )
+        normalized["worldRules"] = normalized.get("worldRules") or normalized.get("world_rules") or []
+        normalized["mainConflicts"] = normalized.get("mainConflicts") or normalized.get("main_conflicts") or []
+        normalized["longTermHooks"] = normalized.get("longTermHooks") or normalized.get("long_term_hooks") or []
+        normalized["openingHook"] = normalized.get("openingHook") or normalized.get("opening_hook") or ""
+        normalized["risksAndFixes"] = normalized.get("risksAndFixes") or normalized.get("risks_and_fixes") or []
+        return normalized

@@ -374,10 +374,14 @@ declare namespace API {
     chapterNumber?: number
     title?: string
     outline?: Record<string, any>
+    chapterMemo?: Record<string, any>
     content?: string
     summary?: string
+    endingState?: Record<string, any>
+    qualityReport?: Record<string, any>
     wordCount?: number
     characterStates?: Record<string, any>
+    contextSnapshotId?: number
     status?: string
     createTime?: string
     updateTime?: string
@@ -420,8 +424,12 @@ declare namespace API {
     keywords?: string[]
     importance?: number
     status?: string
+    lifecycleStage?: string
     mentionHistory?: Record<string, any>[]
     lastMentionedChapter?: number
+    lastActionType?: string
+    lastActionChapter?: number
+    lastActionNote?: string
     createTime?: string
     updateTime?: string
   }
@@ -433,6 +441,13 @@ declare namespace API {
     targetWordCount?: number
     coreIdea?: string
     initialCharacters?: Record<string, any>[]
+  }
+
+  type NovelIdeaEnhanceRequest = {
+    rawIdea?: string
+    genre?: string
+    targetReaders?: string
+    requirements?: string
   }
 
   type NovelSettingUpdateRequest = {
@@ -451,6 +466,11 @@ declare namespace API {
 
   type ChapterGenerateRequest = {
     outline?: Record<string, any>
+    chapterId?: number
+    authorNote?: string
+  }
+
+  type ChapterRegenerateRequest = {
     authorNote?: string
   }
 
@@ -515,11 +535,56 @@ declare namespace API {
     description?: string
     chapters?: number[]
     suggestion?: string
+    paragraphIndex?: number
+    evidenceText?: string
+    startOffset?: number
+    endOffset?: number
+  }
+
+  type ContextSnapshotVO = {
+    id?: number
+    novelId?: number
+    chapterId?: number
+    contextData?: Record<string, any>
+    promptData?: Record<string, any>
+    traceData?: Record<string, any>
+    version?: string
+    createTime?: string
+  }
+
+  type ChapterVersionVO = {
+    id?: number
+    novelId?: number
+    chapterId?: number
+    versionType?: string
+    content?: string
+    contentLength?: number
+    contentPreview?: string
+    metaData?: Record<string, any>
+    createTime?: string
   }
 
   type ConsistencyReport = {
     issues?: ConsistencyIssue[]
     summary?: string
+  }
+
+  type TaskEventVO = {
+    type?: string
+    data?: any
+  }
+
+  type TaskStatusVO = {
+    taskId?: string
+    taskType?: string
+    status?: string
+    novelId?: number
+    chapterId?: number
+    chapterNumber?: number
+    phase?: string
+    result?: Record<string, any>
+    error?: string
+    events?: TaskEventVO[]
   }
 
   type BaseResponseNovelVO = {
@@ -570,11 +635,42 @@ declare namespace API {
     message?: string
   }
 
+  type BaseResponseTaskStatusVO = {
+    code?: number
+    data?: TaskStatusVO
+    message?: string
+  }
+
+  type BaseResponseContextSnapshotVO = {
+    code?: number
+    data?: ContextSnapshotVO
+    message?: string
+  }
+
+  type BaseResponseListChapterVersionVO = {
+    code?: number
+    data?: ChapterVersionVO[]
+    message?: string
+  }
+
   type getNovelParams = {
     novelId: number
   }
 
   type getChapterParams = {
     chapterId: number
+  }
+
+  type getChapterContextSnapshotParams = {
+    chapterId: number
+  }
+
+  type getChapterVersionsParams = {
+    chapterId: number
+    includeContent?: boolean
+  }
+
+  type getNovelTaskStatusParams = {
+    taskId: string
   }
 }

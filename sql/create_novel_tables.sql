@@ -42,8 +42,11 @@ CREATE TABLE IF NOT EXISTS `chapter` (
     `title` VARCHAR(100) DEFAULT NULL COMMENT '章节标题',
 
     `outline` TEXT DEFAULT NULL COMMENT '本章大纲（JSON）',
+    `chapterMemo` LONGTEXT DEFAULT NULL COMMENT '章节备忘录/写作意图（JSON）',
     `content` LONGTEXT DEFAULT NULL COMMENT '正文（Markdown）',
     `summary` TEXT DEFAULT NULL COMMENT '本章摘要（归档时生成，约150字）',
+    `endingState` LONGTEXT DEFAULT NULL COMMENT '章节结尾状态快照（JSON）',
+    `qualityReport` LONGTEXT DEFAULT NULL COMMENT '生成后质量审稿报告（JSON）',
     `wordCount` INT NOT NULL DEFAULT 0 COMMENT '字数',
 
     `characterStates` TEXT DEFAULT NULL COMMENT '本章结束时角色状态快照（JSON）',
@@ -116,9 +119,13 @@ CREATE TABLE IF NOT EXISTS `foreshadowing` (
     `importance` SMALLINT NOT NULL DEFAULT 3 COMMENT '重要度 1-5',
 
     `status` VARCHAR(20) NOT NULL DEFAULT 'active' COMMENT '状态：active/resolved/abandoned',
+    `lifecycleStage` VARCHAR(30) NOT NULL DEFAULT 'planted' COMMENT '内部生命周期：planted/open/progressing/near_payoff/pressured',
 
     `mentionHistory` TEXT DEFAULT NULL COMMENT '历史呼应记录（JSON）',
     `lastMentionedChapter` INT DEFAULT NULL COMMENT '最后一次提及的章节号',
+    `lastActionType` VARCHAR(30) DEFAULT NULL COMMENT '最近动作：plant/mention/advance/resolve/defer',
+    `lastActionChapter` INT DEFAULT NULL COMMENT '最近动作章节号',
+    `lastActionNote` TEXT DEFAULT NULL COMMENT '最近动作说明',
 
     `createTime` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `updateTime` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -151,9 +158,44 @@ CREATE TABLE IF NOT EXISTS `context_snapshot` (
     `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'id',
     `novelId` BIGINT NOT NULL COMMENT '小说ID',
     `chapterId` BIGINT NOT NULL COMMENT '章节ID',
-    `contextData` TEXT DEFAULT NULL COMMENT '生成本章时注入的完整上下文（JSON）',
+    `contextData` LONGTEXT DEFAULT NULL COMMENT '生成本章时注入的上下文包（JSON）',
+    `promptData` LONGTEXT DEFAULT NULL COMMENT '最终写作 Prompt 和规则栈（JSON）',
+    `traceData` LONGTEXT DEFAULT NULL COMMENT '上下文检索/裁剪追踪信息（JSON）',
+    `version` VARCHAR(20) NOT NULL DEFAULT 'v1' COMMENT '上下文包版本',
     `createTime` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
 
     PRIMARY KEY (`id`),
     INDEX `idx_chapter` (`chapterId`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='上下文快照表';
+
+
+-- 小说运行状态表
+CREATE TABLE IF NOT EXISTS `novel_state` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'id',
+    `novelId` BIGINT NOT NULL COMMENT '小说ID',
+    `stateType` VARCHAR(50) NOT NULL COMMENT '状态类型：current_state/reader_expectation/style_memory 等',
+    `stateData` LONGTEXT DEFAULT NULL COMMENT '状态内容（JSON）',
+    `sourceChapterId` BIGINT DEFAULT NULL COMMENT '来源章节ID',
+    `createTime` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `updateTime` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    PRIMARY KEY (`id`),
+    UNIQUE INDEX `uk_novel_state_type` (`novelId`, `stateType`),
+    INDEX `idx_novel_state_novel` (`novelId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='小说运行状态表';
+
+
+-- 章节版本记录表
+CREATE TABLE IF NOT EXISTS `chapter_version` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'id',
+    `novelId` BIGINT NOT NULL COMMENT '小说ID',
+    `chapterId` BIGINT NOT NULL COMMENT '章节ID',
+    `versionType` VARCHAR(30) NOT NULL COMMENT '版本类型：ai_draft/auto_revised/user_confirmed',
+    `content` LONGTEXT DEFAULT NULL COMMENT '版本正文',
+    `metaData` LONGTEXT DEFAULT NULL COMMENT '版本元数据（JSON）',
+    `createTime` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+
+    PRIMARY KEY (`id`),
+    INDEX `idx_chapter_version_chapter` (`chapterId`, `versionType`),
+    INDEX `idx_chapter_version_novel` (`novelId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='章节版本记录表';

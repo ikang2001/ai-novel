@@ -196,7 +196,7 @@ onMounted(async () => {
   const cancelled = route.query.cancelled
 
   if (success === 'true') {
-    await loginUserStore.fetchLoginUser()
+    await loginUserStore.fetchLoginUser({ force: true })
     Modal.success({
       title: '支付成功！',
       content: '恭喜您成为永久会员，已解锁全部高级功能！',

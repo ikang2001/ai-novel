@@ -15,6 +15,19 @@ export async function createNovel(body: API.NovelCreateRequest, options?: { [key
 }
 
 /** 获取小说详情 GET /novel/${param0} */
+/** AI 完善小说核心创意 POST /novel/idea/enhance */
+export async function enhanceNovelIdea(
+  body: API.NovelIdeaEnhanceRequest,
+  options?: { [key: string]: any }
+) {
+  return request<API.BaseResponseDict>('/novel/idea/enhance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    data: body,
+    ...(options || {}),
+  })
+}
+
 export async function getNovel(params: API.getNovelParams, options?: { [key: string]: any }) {
   const { novelId: param0, ...queryParams } = params
   return request<API.BaseResponseNovelVO>(`/novel/${param0}`, {
@@ -238,9 +251,15 @@ export async function confirmChapter(
 }
 
 /** 重新生成章节 PUT /novel/chapter/${param0}/regenerate */
-export async function regenerateChapter(chapterId: number, options?: { [key: string]: any }) {
+export async function regenerateChapter(
+  chapterId: number,
+  body?: API.ChapterRegenerateRequest,
+  options?: { [key: string]: any }
+) {
   return request<API.BaseResponseDict>(`/novel/chapter/${chapterId}/regenerate`, {
     method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    data: body || {},
     ...(options || {}),
   })
 }
@@ -307,6 +326,45 @@ export async function listChapters(novelId: number, options?: { [key: string]: a
 export async function getChapter(params: API.getChapterParams, options?: { [key: string]: any }) {
   const { chapterId: param0, ...queryParams } = params
   return request<API.BaseResponseChapterVO>(`/novel/chapter/${param0}`, {
+    method: 'GET',
+    params: { ...queryParams },
+    ...(options || {}),
+  })
+}
+
+/** 章节上下文快照 GET /novel/chapter/${param0}/context-snapshot */
+export async function getChapterContextSnapshot(
+  params: API.getChapterContextSnapshotParams,
+  options?: { [key: string]: any }
+) {
+  const { chapterId: param0, ...queryParams } = params
+  return request<API.BaseResponseContextSnapshotVO>(`/novel/chapter/${param0}/context-snapshot`, {
+    method: 'GET',
+    params: { ...queryParams },
+    ...(options || {}),
+  })
+}
+
+/** 章节版本记录 GET /novel/chapter/${param0}/versions */
+export async function getChapterVersions(
+  params: API.getChapterVersionsParams,
+  options?: { [key: string]: any }
+) {
+  const { chapterId: param0, ...queryParams } = params
+  return request<API.BaseResponseListChapterVersionVO>(`/novel/chapter/${param0}/versions`, {
+    method: 'GET',
+    params: { ...queryParams },
+    ...(options || {}),
+  })
+}
+
+/** 获取小说任务状态 GET /novel/task/${param0} */
+export async function getNovelTaskStatus(
+  params: API.getNovelTaskStatusParams,
+  options?: { [key: string]: any }
+) {
+  const { taskId: param0, ...queryParams } = params
+  return request<API.BaseResponseTaskStatusVO>(`/novel/task/${param0}`, {
     method: 'GET',
     params: { ...queryParams },
     ...(options || {}),

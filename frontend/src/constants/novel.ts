@@ -24,8 +24,11 @@ export enum NovelPhase {
 // 章节状态枚举
 export enum ChapterStatus {
   DRAFT = 'draft',
+  GENERATING = 'generating',
+  ARCHIVING = 'archiving',
   CONFIRMED = 'confirmed',
   REVISED = 'revised',
+  FAILED = 'failed',
 }
 
 // 角色类型枚举
@@ -59,9 +62,14 @@ export enum NovelSseMessageType {
   STYLE_ANALYZED = 'STYLE_ANALYZED',
   OUTLINE_GENERATING = 'OUTLINE_GENERATING',
   OUTLINE_GENERATED = 'OUTLINE_GENERATED',
+  CONTEXT_PACKAGED = 'CONTEXT_PACKAGED',
   CHAPTER_GENERATING = 'CHAPTER_GENERATING',
   CHAPTER_STREAMING = 'CHAPTER_STREAMING',
   CHAPTER_GENERATED = 'CHAPTER_GENERATED',
+  CHAPTER_REVIEWING = 'CHAPTER_REVIEWING',
+  CHAPTER_REVIEWED = 'CHAPTER_REVIEWED',
+  CHAPTER_REVISING = 'CHAPTER_REVISING',
+  CHAPTER_REVISED = 'CHAPTER_REVISED',
   ARCHIVING = 'ARCHIVING',
   ARCHIVE_COMPLETE = 'ARCHIVE_COMPLETE',
   CONSISTENCY_CHECKING = 'CONSISTENCY_CHECKING',
@@ -88,15 +96,21 @@ export const NOVEL_STATUS_TAG_COLOR_MAP: Record<string, string> = {
 // 章节状态文本映射
 export const CHAPTER_STATUS_TEXT_MAP: Record<string, string> = {
   [ChapterStatus.DRAFT]: '草稿',
+  [ChapterStatus.GENERATING]: '生成中',
+  [ChapterStatus.ARCHIVING]: '归档中',
   [ChapterStatus.CONFIRMED]: '已确认',
   [ChapterStatus.REVISED]: '已修订',
+  [ChapterStatus.FAILED]: '失败',
 }
 
 // 章节状态颜色映射
 export const CHAPTER_STATUS_COLOR_MAP: Record<string, string> = {
   [ChapterStatus.DRAFT]: '#3B82F6',
+  [ChapterStatus.GENERATING]: '#8B5CF6',
+  [ChapterStatus.ARCHIVING]: '#0EA5E9',
   [ChapterStatus.CONFIRMED]: '#22C55E',
   [ChapterStatus.REVISED]: '#F59E0B',
+  [ChapterStatus.FAILED]: '#EF4444',
 }
 
 // 角色类型文本映射

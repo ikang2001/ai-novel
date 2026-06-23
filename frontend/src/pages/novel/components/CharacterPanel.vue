@@ -95,7 +95,11 @@ const form = reactive({
 
 const loadCharacters = async () => {
   const res = await listCharacters(props.novelId)
-  if (res.data.code === 0) characters.value = res.data.data || []
+  if (res.data.code === 0) {
+    characters.value = res.data.data || []
+  } else {
+    message.error(res.data.message || '加载角色失败')
+  }
 }
 
 watch(() => props.visible, (v) => { if (v) loadCharacters() })
@@ -127,10 +131,18 @@ const handleSubmit = async () => {
   submitting.value = true
   try {
     if (editingId.value) {
-      await updateCharacter(editingId.value, { ...form })
+      const res = await updateCharacter(editingId.value, { ...form })
+      if (res.data.code !== 0) {
+        message.error(res.data.message || '更新失败')
+        return
+      }
       message.success('更新成功')
     } else {
-      await createCharacter(props.novelId, { ...form })
+      const res = await createCharacter(props.novelId, { ...form })
+      if (res.data.code !== 0) {
+        message.error(res.data.message || '创建失败')
+        return
+      }
       message.success('创建成功')
     }
     showCreate.value = false
@@ -146,7 +158,11 @@ const handleSubmit = async () => {
 
 const handleDelete = async (id: number) => {
   try {
-    await deleteCharacter(id)
+    const res = await deleteCharacter(id)
+    if (res.data.code !== 0) {
+      message.error(res.data.message || '删除失败')
+      return
+    }
     message.success('删除成功')
     loadCharacters()
     emit('refresh')

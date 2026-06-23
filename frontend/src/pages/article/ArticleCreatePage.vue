@@ -744,7 +744,7 @@ const startCreate = async () => {
     addLog(`任务创建成功，ID: ${newTaskId}`, 'success')
 
     // 刷新用户信息（更新配额）
-    await loginUserStore.fetchLoginUser()
+    await loginUserStore.fetchLoginUser({ force: true })
 
     // 建立 SSE 连接
     addLog('已建立实时连接，开始生成...', 'info')

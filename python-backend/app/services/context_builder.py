@@ -1,193 +1,169 @@
-"""上下文组装器（三层记忆系统的核心）"""
+"""Context package builder for novel chapter generation."""
 
 import json
 import logging
 import re
-from typing import Optional, List, Dict, Any
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
 
-from app.services.novel_service import NovelService
 from app.services.character_service import CharacterService
 from app.services.foreshadowing_service import ForeshadowingService
+from app.services.novel_service import NovelService
 
 logger = logging.getLogger(__name__)
 
 
 class ContextBuilder:
-    """组装每章生成时的完整上下文
+    """Builds governed context for a target chapter.
 
-    三层记忆架构：
-    - 第一层：恒定记忆（世界观、核心角色、风格指南）~1500字
-    - 第二层：近期记忆（最近3章摘要、上一章末尾、角色状态）~1200字
-    - 第三层：长期记忆（按需检索：相关角色、伏笔、地点）~300-500字
+    The public `build` method remains for backward compatibility. New code should
+    use `build_package` and feed it into PromptCrafter.
     """
 
-    def __init__(self, novel_service: NovelService,
-                 character_service: CharacterService,
-                 foreshadowing_service: ForeshadowingService):
+    def __init__(
+        self,
+        novel_service: NovelService,
+        character_service: CharacterService,
+        foreshadowing_service: ForeshadowingService,
+    ):
         self.novel_service = novel_service
         self.character_service = character_service
         self.foreshadowing_service = foreshadowing_service
 
-    async def build(self, novel_id: int, chapter_outline: str) -> str:
-        """组装完整上下文，返回拼接后的字符串
+    async def build(
+        self,
+        novel_id: int,
+        chapter_outline: Any,
+        chapter_id: Optional[int] = None,
+        chapter_number: Optional[int] = None,
+    ) -> str:
+        """Return a readable context string for legacy prompt usage."""
+        package = await self.build_package(novel_id, chapter_outline, chapter_id, chapter_number)
+        return self.format_package_for_prompt(package)
 
-        这是整个记忆系统的入口方法。
-        它协调三层记忆的构建，最终拼接成一个完整的 prompt 上下文。
-        """
-        sections = []
-
-        # === 第一层：恒定记忆 ===
-        constant = await self._build_constant_memory(novel_id)
-        if constant:
-            sections.append(constant)
-
-        # === 第二层：近期记忆 ===
-        recent = await self._build_recent_memory(novel_id)
-        if recent:
-            sections.append(recent)
-
-        # === 第三层：长期记忆（按需检索）===
-        long_term = await self._build_long_term_memory(novel_id, chapter_outline)
-        if long_term:
-            sections.append(long_term)
-
-        # === 本章大纲 ===
-        sections.append(f"[本章大纲]\n{chapter_outline}")
-
-        context = "\n\n".join(sections)
-        logger.info("上下文组装完成, novel_id=%s, 总长度=%d字", novel_id, len(context))
-        return context
-
-    async def _build_constant_memory(self, novel_id: int) -> str:
-        """构建恒定记忆（每次注入，内容不变除非作者修改）
-
-        包含：风格指南、世界观设定、核心角色档案、全书梗概（如果有）
-        """
-        sections = []
-
+    async def build_package(
+        self,
+        novel_id: int,
+        chapter_outline: Any,
+        chapter_id: Optional[int] = None,
+        chapter_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Build a structured context package for a specific target chapter."""
+        outline = self._coerce_dict(chapter_outline)
         novel = await self.novel_service.get_novel(novel_id)
         if not novel:
-            return ""
+            raise ValueError(f"小说不存在: {novel_id}")
 
-        # 风格指南
-        style_guide = novel.get("style_guide")
-        if style_guide:
-            if isinstance(style_guide, str):
-                try:
-                    style_guide = json.loads(style_guide)
-                except json.JSONDecodeError:
-                    pass
-            if isinstance(style_guide, dict):
-                # 把字典格式转成可读文本
-                guide_text = self._format_dict_as_text(style_guide)
-                sections.append(f"[风格指南]\n{guide_text}")
-            elif isinstance(style_guide, str):
-                sections.append(f"[风格指南]\n{style_guide}")
+        target_number = chapter_number or await self.novel_service.get_next_chapter_number(novel_id)
+        target_chapter = {
+            "chapterId": chapter_id,
+            "chapterNumber": target_number,
+            "volumeNumber": novel.get("currentVolumeNumber", 1),
+        }
 
-        # 世界观设定
-        world_setting = novel.get("world_setting")
-        if world_setting:
-            if isinstance(world_setting, str):
-                try:
-                    world_setting = json.loads(world_setting)
-                except json.JSONDecodeError:
-                    pass
-            if isinstance(world_setting, dict):
-                setting_text = self._format_dict_as_text(world_setting)
-                sections.append(f"[世界观设定]\n{setting_text}")
-            elif isinstance(world_setting, str):
-                sections.append(f"[世界观设定]\n{world_setting}")
+        stable_memory = await self._build_stable_memory(novel_id, novel)
+        recent_memory = await self._build_recent_memory(novel_id, target_number)
+        long_term_memory = await self._build_long_term_memory(novel_id, outline, target_number)
+        hook_debt = await self.foreshadowing_service.get_hook_debt(novel_id, target_number, limit=8)
+        chapter_memo = self._ensure_chapter_memo(outline, recent_memory, hook_debt)
+        rule_stack = self._build_rule_stack(novel, chapter_memo, hook_debt)
 
-        # 核心角色档案
+        package = {
+            "version": "v1",
+            "novel": {
+                "id": novel_id,
+                "title": novel.get("title"),
+                "genre": novel.get("genre"),
+                "targetReaders": novel.get("targetReaders"),
+                "currentChapterNumber": novel.get("currentChapterNumber", 0),
+                "currentVolumeNumber": novel.get("currentVolumeNumber", 1),
+            },
+            "targetChapter": target_chapter,
+            "stableMemory": stable_memory,
+            "recentMemory": recent_memory,
+            "longTermMemory": long_term_memory,
+            "hookDebt": hook_debt,
+            "chapterMemo": chapter_memo,
+            "ruleStack": rule_stack,
+            "trace": {
+                "excludedChapterNumber": target_number,
+                "recentChapterNumbers": [c.get("chapterNumber") for c in recent_memory.get("recentChapters", [])],
+                "previousChapterNumber": recent_memory.get("previousChapter", {}).get("chapterNumber"),
+                "hookDebtCount": len(hook_debt),
+                "contextPolicy": "Only chapters with chapterNumber < target chapter are eligible for recent context.",
+            },
+        }
+        safe_package = self._json_safe(package)
+        logger.info(
+            "上下文包组装完成, novel_id=%s, chapter=%s, recent=%s, hook_debt=%s",
+            novel_id,
+            target_number,
+            safe_package["trace"]["recentChapterNumbers"],
+            len(hook_debt),
+        )
+        return safe_package
+
+    async def _build_stable_memory(self, novel_id: int, novel: Dict[str, Any]) -> Dict[str, Any]:
         core_chars = await self.character_service.get_core_characters(novel_id)
-        if core_chars:
-            char_text = "\n\n".join(self._format_character_detail(c) for c in core_chars)
-            sections.append(f"[核心角色档案]\n{char_text}")
+        style_guide = self._coerce_dict(novel.get("styleGuide")) or novel.get("styleGuide")
+        world_setting = self._coerce_dict(novel.get("worldSetting")) or novel.get("worldSetting")
+        volume_outline = self._coerce_list(novel.get("volumeOutline")) or novel.get("volumeOutline")
+        return {
+            "styleGuide": style_guide,
+            "worldSetting": world_setting,
+            "volumeOutline": volume_outline,
+            "coreCharacters": core_chars,
+            "synopsis": novel.get("synopsis"),
+        }
 
-        # 全书梗概（超过50章时注入）
-        chapter_count = novel.get("currentChapterNumber", 0)
-        synopsis = novel.get("synopsis")
-        if chapter_count > 50 and synopsis:
-            sections.append(f"[全书梗概]\n{synopsis}")
-
-        return "\n\n".join(sections)
-
-    async def _build_recent_memory(self, novel_id: int) -> str:
-        """构建近期记忆（随新章归档自动滚动）
-
-        包含：最近3章摘要、上一章末尾、角色当前状态、活跃伏笔
-        """
-        sections = []
-
-        # 最近3章摘要
-        recent_chapters = await self.novel_service.get_recent_chapters(novel_id, limit=3)
-        if recent_chapters:
-            summaries = []
-            for ch in recent_chapters:
-                summary = ch.get("summary")
-                if summary:
-                    ch_num = ch.get("chapterNumber", "?")
-                    ch_title = ch.get("title", "")
-                    title_part = f" {ch_title}" if ch_title else ""
-                    summaries.append(f"第{ch_num}章{title_part}：{summary}")
-            if summaries:
-                sections.append("[最近章节摘要]\n" + "\n".join(summaries))
-
-        # 上一章末尾（最后500字，保持语感衔接）
-        latest_chapter = await self.novel_service.get_latest_chapter(novel_id)
-        if latest_chapter and latest_chapter.get("content"):
-            content = latest_chapter["content"]
-            # 取最后500个字符
-            tail = content[-500:] if len(content) > 500 else content
-            # 如果截断了，加省略号
-            prefix = "..." if len(content) > 500 else ""
-            sections.append(f"[上一章末尾]\n{prefix}{tail}")
-
-        # 当前角色状态
+    async def _build_recent_memory(self, novel_id: int, chapter_number: int) -> Dict[str, Any]:
+        recent_chapters = await self.novel_service.get_recent_chapters_before(novel_id, chapter_number, limit=3)
+        previous_chapter = await self.novel_service.get_previous_chapter(novel_id, chapter_number)
         char_states = await self.character_service.get_all_current_states(novel_id)
-        if char_states:
-            states_text = "\n".join(
-                f"- {s['name']}（{s['role_type']}）：在{s['location']}，{s['status']}"
-                for s in char_states
-            )
-            sections.append(f"[当前角色状态]\n{states_text}")
-
-        # 活跃伏笔列表（简要）
         active_fs = await self.foreshadowing_service.get_active_foreshadowing(novel_id)
-        if active_fs:
-            fs_text = "\n".join(
-                f"- {self._format_foreshadowing_brief(fs)}"
-                for fs in active_fs[:10]  # 最多显示10条，避免上下文过长
-            )
-            sections.append(f"[活跃伏笔]\n{fs_text}")
+        previous_tail = ""
+        if previous_chapter and previous_chapter.get("content"):
+            content = previous_chapter["content"]
+            previous_tail = ("..." if len(content) > 600 else "") + content[-600:]
+        return {
+            "recentChapters": [
+                {
+                    "chapterId": ch.get("id"),
+                    "chapterNumber": ch.get("chapterNumber"),
+                    "title": ch.get("title"),
+                    "summary": ch.get("summary"),
+                    "endingState": ch.get("endingState"),
+                }
+                for ch in recent_chapters
+            ],
+            "previousChapter": {
+                "chapterId": previous_chapter.get("id") if previous_chapter else None,
+                "chapterNumber": previous_chapter.get("chapterNumber") if previous_chapter else None,
+                "title": previous_chapter.get("title") if previous_chapter else None,
+                "summary": previous_chapter.get("summary") if previous_chapter else None,
+                "endingState": previous_chapter.get("endingState") if previous_chapter else None,
+                "tail": previous_tail,
+            },
+            "characterStates": char_states,
+            "activeForeshadowing": active_fs[:12],
+        }
 
-        return "\n\n".join(sections)
-
-    async def _build_long_term_memory(self, novel_id: int, chapter_outline: str) -> str:
-        """构建长期记忆（按需检索注入）
-
-        根据本章大纲，检索相关的角色、伏笔、地点信息。
-        这是解决"写到第100章还记得第3章细节"的关键。
-        """
-        sections = []
-
-        # 获取所有角色名和地点名（用于实体提取）
+    async def _build_long_term_memory(
+        self,
+        novel_id: int,
+        outline: Dict[str, Any],
+        chapter_number: int,
+    ) -> Dict[str, Any]:
+        outline_text = json.dumps(outline, ensure_ascii=False)
         all_chars = await self.character_service.get_all_characters(novel_id)
-        char_names = [c["name"] for c in all_chars]
-        # 也收集别名
-        for c in all_chars:
-            aliases = c.get("aliases") or []
+        char_names = [c["name"] for c in all_chars if c.get("name")]
+        for char in all_chars:
+            aliases = char.get("aliases") or []
             if isinstance(aliases, list):
                 char_names.extend(aliases)
 
-        # 从大纲中提取实体
-        entities = self._extract_entities(chapter_outline, known_characters=char_names)
-
-        # 检索非核心角色的详细信息
-        # （核心角色已在恒定记忆中注入，这里只查非核心的）
-        core_chars = await self.character_service.get_core_characters(novel_id)
-        core_names = {c["name"] for c in core_chars}
-
+        entities = self._extract_entities(outline_text, known_characters=char_names)
+        core_names = {c["name"] for c in await self.character_service.get_core_characters(novel_id)}
         extra_chars = []
         for name in entities.get("characters", []):
             if name not in core_names:
@@ -195,170 +171,299 @@ class ContextBuilder:
                 if char:
                     extra_chars.append(char)
 
-        if extra_chars:
-            char_text = "\n".join(self._format_character_detail(c) for c in extra_chars)
-            sections.append(f"[相关角色详情]\n{char_text}")
+        keywords = list(dict.fromkeys(entities.get("keywords", []) + entities.get("characters", [])))
+        related_fs = await self.foreshadowing_service.search_by_keywords(novel_id, keywords) if keywords else []
+        stale_fs = await self.foreshadowing_service.get_stale_foreshadowing(novel_id, chapter_number, threshold=20)
+        near_target = await self.foreshadowing_service.get_near_target_foreshadowing(novel_id, chapter_number)
+        current_state = await self.novel_service.get_novel_state(novel_id, "current_state")
+        reader_expectation = await self.novel_service.get_novel_state(novel_id, "reader_expectation")
+        style_memory = await self.novel_service.get_novel_state(novel_id, "style_memory")
+        revision_preference = await self.novel_service.get_novel_state(novel_id, "revision_preference")
 
-        # 检索相关伏笔（通过关键词匹配）
-        keywords = entities.get("keywords", [])
-        # 也把提到的角色名作为关键词
-        keywords.extend(entities.get("characters", []))
+        return {
+            "matchedEntities": entities,
+            "relatedCharacters": extra_chars[:6],
+            "relatedForeshadowing": related_fs[:6],
+            "staleForeshadowing": stale_fs[:5],
+            "nearTargetForeshadowing": near_target[:5],
+            "currentState": current_state.get("stateData") if current_state else None,
+            "readerExpectation": reader_expectation.get("stateData") if reader_expectation else None,
+            "styleMemory": style_memory.get("stateData") if style_memory else None,
+            "revisionPreference": revision_preference.get("stateData") if revision_preference else None,
+        }
 
-        if keywords:
-            related_fs = await self.foreshadowing_service.search_by_keywords(novel_id, keywords)
-            if related_fs:
-                fs_text = "\n".join(
-                    f"- [第{fs.get('planted_chapter_id', '?')}章] {fs['surface']}"
-                    + (f"（真相：{fs['hidden_truth']}）" if fs.get('hidden_truth') else "")
-                    for fs in related_fs[:5]  # 最多5条
-                )
-                sections.append(f"[相关伏笔]\n{fs_text}")
+    def _ensure_chapter_memo(
+        self,
+        outline: Dict[str, Any],
+        recent_memory: Dict[str, Any],
+        hook_debt: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        memo = dict(outline)
+        previous = recent_memory.get("previousChapter") or {}
+        previous_ending = previous.get("endingState") or {}
+        if not isinstance(previous_ending, dict):
+            previous_ending = {}
+        memo.setdefault("chapterTask", outline.get("chapterTask") or outline.get("chapter_task") or "推进本章剧情，制造可见状态变化")
+        memo.setdefault(
+            "readerExpectation",
+            outline.get("readerExpectation")
+            or previous_ending.get("readerExpectation")
+            or "承接上一章结尾，给读者一个新的问题、行动或情绪落点",
+        )
+        memo.setdefault(
+            "previousEmotionalResidue",
+            outline.get("previousEmotionalResidue")
+            or previous_ending.get("emotionalResidue")
+            or previous.get("summary")
+            or "",
+        )
+        memo.setdefault("requiredEndingChange", outline.get("requiredEndingChange") or outline.get("chapterHook") or "")
+        memo.setdefault("informationGap", outline.get("informationGap") or "本章至少保留一个读者想继续追问的信息差")
+        memo.setdefault("hookOperations", self._default_hook_operations(outline, hook_debt))
+        memo.setdefault("prohibitions", [
+            "不要复述上一章剧情当开头",
+            "不要让角色只为推动剧情而突然改变立场",
+            "不要用总结式旁白替代具体行动、物件、对话或场景变化",
+        ])
+        memo.setdefault("sceneCraft", self._infer_scene_craft(memo))
+        return memo
 
-        # 长期未提及的伏笔提醒（超过20章未提及）
-        # 需要当前章节号
-        novel = await self.novel_service.get_novel(novel_id)
-        current_chapter = novel.get("currentChapterNumber", 0) if novel else 0
-        if current_chapter > 0:
-            stale_fs = await self.foreshadowing_service.get_stale_foreshadowing(
-                novel_id, current_chapter, threshold=20
-            )
-            if stale_fs:
-                stale_text = "、".join(
-                    f"第{fs.get('planted_chapter_id', '?')}章'{fs['surface'][:15]}'"
-                    for fs in stale_fs[:3]
-                )
-                sections.append(f"[伏笔提醒] 以下伏笔已很久未提及，本章如合适可呼应：{stale_text}")
+    def _default_hook_operations(self, outline: Dict[str, Any], hook_debt: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        operations = []
+        for item in hook_debt[:3]:
+            stage = item.get("computedLifecycleStage") or item.get("lifecycleStage") or "open"
+            operations.append({
+                "action": "advance" if stage != "pressured" else "resolve_or_advance",
+                "foreshadowingId": item.get("id"),
+                "surface": item.get("surface"),
+                "reason": item.get("debtReason"),
+            })
+        for surface in outline.get("foreshadowingToPlant") or outline.get("foreshadowing_to_plant") or []:
+            operations.append({"action": "plant", "surface": surface, "reason": "本章大纲要求新埋伏笔"})
+        for surface in outline.get("foreshadowingToUse") or outline.get("foreshadowing_to_use") or []:
+            operations.append({"action": "advance", "surface": surface, "reason": "本章大纲要求呼应"})
+        return operations
 
-            # 接近目标揭示的伏笔
-            near_target = await self.foreshadowing_service.get_near_target_foreshadowing(
-                novel_id, current_chapter
-            )
-            if near_target:
-                target_text = "\n".join(
-                    f"- {fs['surface']}(计划在第{fs['target_chapter']}章揭示)"
-                    for fs in near_target[:3]
-                )
-                sections.append(f"[揭示提示] 以下伏笔接近计划揭示时间，可开始铺垫：\n{target_text}")
+    def _infer_scene_craft(self, memo: Dict[str, Any]) -> List[str]:
+        outline_text = json.dumps(memo, ensure_ascii=False)
+        craft = []
+        if any(word in outline_text for word in ("战", "打", "追", "逃", "袭")):
+            craft.append("动作场面：动作必须体现目标、阻碍和代价，避免只写招式名。")
+        if any(word in outline_text for word in ("谈", "问", "说", "对话", "争执")):
+            craft.append("对话场面：每句台词都带立场、试探或隐瞒，避免解释设定。")
+        if any(word in outline_text for word in ("发现", "线索", "秘密", "真相")):
+            craft.append("悬疑场面：线索必须有可见载体，揭示一层同时保留一层。")
+        if not craft:
+            craft.append("场景推进：每个场景至少改变一个事实、关系、情绪或读者问题。")
+        return craft
 
-        return "\n\n".join(sections)
+    def _build_rule_stack(
+        self,
+        novel: Dict[str, Any],
+        chapter_memo: Dict[str, Any],
+        hook_debt: List[Dict[str, Any]],
+    ) -> List[str]:
+        rules = [
+            "硬事实、角色状态、伏笔账本优先于临场发挥。",
+            "每个场景必须有入口画面、角色目标、阻碍、转折和出口状态。",
+            "承接上一章时写情绪和行动的自然延续，不要概括复盘。",
+            "角色行为必须由过往经历、当前利益和性格共同推出。",
+            "避免AI腔：少用空泛形容词、宏大总结、重复主语、同质化段落。",
+        ]
+        if hook_debt:
+            rules.append("伏笔债务必须用动作、物件、对话或选择推进；单纯内心提到不算推进。")
+        style_guide = self._coerce_dict(novel.get("styleGuide"))
+        if isinstance(style_guide, dict):
+            forbidden = style_guide.get("forbidden_words") or style_guide.get("forbidden_patterns")
+            if forbidden:
+                rules.append(f"遵守风格禁忌：{forbidden}")
+        prohibitions = chapter_memo.get("prohibitions") or []
+        rules.extend(str(item) for item in prohibitions if item)
+        return rules
 
-    def _extract_entities(self, outline: str, known_characters: List[str] = None,
-                          known_locations: List[str] = None) -> Dict[str, List[str]]:
-        """从大纲文本中提取实体（角色名、地点名、关键词）
+    def format_package_for_prompt(self, package: Dict[str, Any]) -> str:
+        """Render the structured package into readable text."""
+        lines = []
+        novel = package.get("novel", {})
+        target = package.get("targetChapter", {})
+        lines.append(f"[目标章节]\n书名：{novel.get('title', '')}\n第{target.get('chapterNumber')}章")
 
-        简单实现：遍历已知名称列表，检查是否出现在大纲文本中。
-        更好的实现可以用 NER 或 LLM，但会增加延迟和成本。
-        """
+        stable = package.get("stableMemory", {})
+        if stable.get("worldSetting"):
+            lines.append(f"[世界观设定]\n{self._format_value(stable['worldSetting'])}")
+        if stable.get("styleGuide"):
+            lines.append(f"[风格指南]\n{self._format_value(stable['styleGuide'])}")
+        if stable.get("coreCharacters"):
+            lines.append("[核心角色]\n" + "\n\n".join(self._format_character_detail(c) for c in stable["coreCharacters"]))
+
+        recent = package.get("recentMemory", {})
+        recent_chapters = recent.get("recentChapters") or []
+        if recent_chapters:
+            summaries = [
+                f"第{ch.get('chapterNumber')}章 {ch.get('title') or ''}：{ch.get('summary') or '暂无摘要'}"
+                for ch in recent_chapters
+            ]
+            lines.append("[最近章节摘要]\n" + "\n".join(summaries))
+        previous = recent.get("previousChapter") or {}
+        if previous.get("tail"):
+            lines.append(f"[上一章末尾]\n{previous['tail']}")
+        if previous.get("endingState"):
+            lines.append(f"[上一章结尾状态]\n{self._format_value(previous['endingState'])}")
+        if recent.get("characterStates"):
+            states = [
+                f"- {s.get('name')}（{s.get('role_type')}）：在{s.get('location')}，{s.get('status')}"
+                for s in recent["characterStates"]
+            ]
+            lines.append("[当前角色状态]\n" + "\n".join(states))
+
+        long_term = package.get("longTermMemory", {})
+        if long_term.get("relatedCharacters"):
+            lines.append("[相关角色详情]\n" + "\n\n".join(self._format_character_detail(c) for c in long_term["relatedCharacters"]))
+        if long_term.get("relatedForeshadowing"):
+            lines.append("[相关伏笔]\n" + self._format_foreshadowing_list(long_term["relatedForeshadowing"]))
+        if package.get("hookDebt"):
+            debt_lines = [
+                f"- {fs.get('surface')}：{fs.get('debtReason')}"
+                for fs in package["hookDebt"]
+            ]
+            lines.append("[伏笔债务]\n" + "\n".join(debt_lines))
+
+        lines.append(f"[本章备忘录]\n{self._format_value(package.get('chapterMemo', {}))}")
+        lines.append("[规则栈]\n" + "\n".join(f"- {rule}" for rule in package.get("ruleStack", [])))
+        return "\n\n".join(lines)
+
+    def _extract_entities(
+        self,
+        outline: str,
+        known_characters: Optional[List[str]] = None,
+        known_locations: Optional[List[str]] = None,
+    ) -> Dict[str, List[str]]:
         result = {"characters": [], "locations": [], "keywords": []}
-
         if not outline:
             return result
-
-        # 提取角色名
         if known_characters:
             for name in set(known_characters):
                 if name and len(name) >= 2 and name in outline:
                     result["characters"].append(name)
-
-        # 提取地点名
         if known_locations:
             for name in set(known_locations):
                 if name and len(name) >= 2 and name in outline:
                     result["locations"].append(name)
-
-        # 提取关键词（简单的：去掉常见词，取有意义的词）
-        # 这里用一个简单的方法：提取中文词（2-4字的连续中文）
-        chinese_words = re.findall(r'[\u4e00-\u9fff]{2,4}', outline)
-        # 去掉常见停用词
-        stopwords = {"一个", "他们", "我们", "这个", "那个", "什么", "怎么", "可以", "没有",
-                      "不是", "但是", "然后", "因为", "所以", "如果", "已经", "还是", "只是",
-                      "在场", "开始", "出现", "发现", "决定", "告诉", "知道", "看到", "感到"}
-        keywords = [w for w in chinese_words if w not in stopwords and len(w) >= 2]
-        # 去重并取前10个
-        result["keywords"] = list(set(keywords))[:10]
-
+        chinese_words = re.findall(r"[\u4e00-\u9fff]{2,4}", outline)
+        stopwords = {
+            "一个", "他们", "我们", "这个", "那个", "什么", "怎么", "可以", "没有",
+            "不是", "但是", "然后", "因为", "所以", "如果", "已经", "还是", "只是",
+            "在场", "开始", "出现", "发现", "决定", "告诉", "知道", "看到", "感到",
+        }
+        result["keywords"] = list(dict.fromkeys(w for w in chinese_words if w not in stopwords))[:12]
         return result
 
     def _format_character_detail(self, char: Dict[str, Any]) -> str:
-        """格式化角色详情为可读文本"""
-        parts = [f"角色[{char['name']}]"]
-
-        role_type = char.get("role_type")
+        parts = [f"角色[{char.get('name', '')}]"]
+        role_type = char.get("roleType")
         if role_type:
             role_map = {"protagonist": "主角", "supporting": "配角", "antagonist": "反派", "minor": "龙套"}
             parts.append(role_map.get(role_type, role_type))
-
         if char.get("appearance"):
             parts.append(char["appearance"])
-
         text = "，".join(parts)
-
-        if char.get("personality"):
-            text += f"\n性格：{char['personality']}"
-
-        skills = char.get("skills")
-        if skills:
-            if isinstance(skills, list):
-                text += f"\n技能：{'、'.join(skills)}"
-            elif isinstance(skills, str):
-                text += f"\n技能：{skills}"
-
-        if char.get("current_status"):
-            text += f"\n当前状态：{char['current_status']}"
-
-        if char.get("current_location"):
-            text += f"\n当前位置：{char['current_location']}"
-
-        if char.get("notes"):
-            text += f"\n备注：{char['notes']}"
-
+        for label, key in (
+            ("性格", "personality"),
+            ("说话风格", "speechStyle"),
+            ("当前状态", "currentStatus"),
+            ("当前位置", "currentLocation"),
+            ("备注", "notes"),
+        ):
+            if char.get(key):
+                text += f"\n{label}：{char[key]}"
+        if char.get("skills"):
+            text += f"\n技能：{self._format_value(char['skills'])}"
         return text
 
     def _format_foreshadowing_brief(self, fs: Dict[str, Any]) -> str:
-        """格式化伏笔简要信息"""
-        planted = fs.get("planted_chapter_id") or fs.get("planted_chapter_number") or "?"
-        text = f"[第{planted}章] {fs['surface']}"
-        if fs.get("hidden_truth"):
-            text += f"（真相：{fs['hidden_truth']}）"
+        planted = fs.get("plantedChapterNumber") or fs.get("plantedChapterId") or "?"
+        text = f"[第{planted}章] {fs.get('surface', '')}"
+        if fs.get("hiddenTruth"):
+            text += f"（真相：{fs['hiddenTruth']}）"
+        if fs.get("computedLifecycleStage") or fs.get("lifecycleStage"):
+            text += f"｜阶段：{fs.get('computedLifecycleStage') or fs.get('lifecycleStage')}"
         return text
 
-    def _format_foreshadowing_list(self, foreshadowing_list: List[Dict]) -> str:
-        """格式化伏笔列表"""
-        if not foreshadowing_list:
+    def _format_foreshadowing_list(self, foreshadowing_list: List[Dict[str, Any]]) -> str:
+        return "\n".join(f"- {self._format_foreshadowing_brief(fs)}" for fs in foreshadowing_list)
+
+    def _format_value(self, value: Any) -> str:
+        if value is None:
             return ""
-        return "\n".join(
-            f"- {self._format_foreshadowing_brief(fs)}"
-            for fs in foreshadowing_list
-        )
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "\n".join(f"- {self._format_value(item)}" for item in value)
+        if isinstance(value, dict):
+            lines = []
+            field_names = {
+                "era": "时代背景",
+                "rules": "核心规则",
+                "factions": "势力分布",
+                "locations": "重要地点",
+                "narrative_perspective": "叙述视角",
+                "language_style": "语言风格",
+                "dialogue_style": "对话风格",
+                "description_preference": "描写偏好",
+                "rhythm": "节奏特点",
+                "techniques": "常用手法",
+                "forbidden_words": "禁忌词汇",
+                "forbidden_patterns": "禁忌句式",
+                "chapterTask": "本章任务",
+                "readerExpectation": "读者期待",
+                "previousEmotionalResidue": "上一章情绪残留",
+                "requiredEndingChange": "章尾必须变化",
+                "informationGap": "信息差",
+                "hookOperations": "伏笔操作",
+                "prohibitions": "禁止事项",
+                "sceneCraft": "场景技法",
+            }
+            for key, item in value.items():
+                label = field_names.get(key, key)
+                if isinstance(item, (dict, list)):
+                    lines.append(f"{label}：\n{self._format_value(item)}")
+                else:
+                    lines.append(f"{label}：{item}")
+            return "\n".join(lines)
+        return str(value)
 
-    def _format_dict_as_text(self, d: Dict[str, Any], indent: int = 0) -> str:
-        """把字典格式转成可读文本
+    def _coerce_dict(self, value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {"raw": value}
+        return {}
 
-        为什么不用 JSON.dumps？
-        因为 JSON 格式对 LLM 来说不如自然语言友好。
-        例如：{"era": "现代", "rules": "灵力九阶"}
-        转成："时代背景：现代\n核心规则：灵力九阶"
-        """
-        lines = []
-        # 字段名的中文映射
-        field_names = {
-            "era": "时代背景", "rules": "核心规则", "factions": "势力分布",
-            "locations": "重要地点", "narrative_perspective": "叙述视角",
-            "language_style": "语言风格", "dialogue_style": "对话风格",
-            "description_preference": "描写偏好", "rhythm": "节奏特点",
-            "techniques": "常用手法", "forbidden_words": "禁忌词汇",
-            "forbidden_patterns": "禁忌句式", "sample_sentences": "参考句式",
-            "chapter_opening_style": "章节开头风格", "chapter_ending_style": "章节结尾风格",
-            "emotional_tone": "情感基调",
-        }
-        for key, value in d.items():
-            display_name = field_names.get(key, key)
-            if isinstance(value, list):
-                lines.append(f"{display_name}：{'、'.join(str(v) for v in value)}")
-            elif isinstance(value, dict):
-                lines.append(f"{display_name}：")
-                for sub_key, sub_value in value.items():
-                    lines.append(f"  {sub_key}：{sub_value}")
-            else:
-                lines.append(f"{display_name}：{value}")
-        return "\n".join(lines)
+    def _coerce_list(self, value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else []
+            except json.JSONDecodeError:
+                return []
+        return []
+
+    def _json_safe(self, value: Any) -> Any:
+        """Convert database rows and datetime values into JSON-safe objects."""
+        if isinstance(value, dict):
+            return {key: self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)

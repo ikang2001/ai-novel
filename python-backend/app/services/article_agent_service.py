@@ -5,7 +5,6 @@ import logging
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from typing import Callable, List, Optional
-from openai import AsyncOpenAI
 
 from app.agent.orchestrator import ArticleAgentOrchestrator
 from app.agent.parallel.image_generator import ParallelImageGenerator
@@ -24,6 +23,7 @@ from app.schemas.article import (
 from app.models.enums import SseMessageTypeEnum, ImageMethodEnum, ArticleStyleEnum
 from app.services.agent_log_service import AgentLogService
 from app.services.image_service_strategy import ImageServiceStrategy
+from app.services.llm_client import create_chat_client, get_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +32,8 @@ class ArticleAgentService:
     """文章智能体编排服务"""
     
     def __init__(self):
-        # 初始化 OpenAI 客户端（DashScope 兼容）
-        self.client = AsyncOpenAI(
-            api_key=settings.dashscope_api_key,
-            base_url=settings.dashscope_base_url
-        )
-        self.model = settings.dashscope_model
+        self.client = create_chat_client()
+        self.model = get_chat_model()
         
         # 初始化策略模式（第 5 期改动）
         self.image_service_strategy = ImageServiceStrategy()

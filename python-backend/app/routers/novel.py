@@ -5,21 +5,21 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import StreamingResponse
 from databases import Database
 
 from app.database import get_db
 from app.deps import require_login
 from app.exceptions import ErrorCode, throw_if, throw_if_not
 from app.managers.sse_manager import sse_emitter_manager
-from app.models.novel_enums import NovelGenreEnum
+from app.models.novel_enums import ChapterStatusEnum, NovelGenreEnum
 from app.schemas.common import BaseResponse
 from app.schemas.novel import (
-    NovelCreateRequest, NovelSettingUpdateRequest, StyleAnalyzeRequest,
-    ChapterPlanRequest, ChapterGenerateRequest, ChapterConfirmRequest,
+    NovelCreateRequest, NovelIdeaEnhanceRequest, NovelSettingUpdateRequest, StyleAnalyzeRequest,
+    ChapterPlanRequest, ChapterGenerateRequest, ChapterRegenerateRequest, ChapterConfirmRequest,
     ChapterContentUpdateRequest, ChapterCreateRequest,
     CharacterCreateRequest, CharacterUpdateRequest,
     ForeshadowingCreateRequest, ForeshadowingUpdateRequest,
+    TaskStatusVO,
 )
 from app.schemas.user import LoginUserVO
 from app.services.novel_service import NovelService
@@ -55,9 +55,33 @@ def _check_novel_permission(novel: dict, current_user: LoginUserVO):
     """检查小说访问权限"""
     throw_if_not(novel, ErrorCode.NOT_FOUND_ERROR, "小说不存在")
     throw_if(
-        novel["userId"] != current_user.id and current_user.userRole != "admin",
+        novel["userId"] != current_user.id and current_user.user_role != "admin",
         ErrorCode.NO_AUTH_ERROR, "无权限访问"
     )
+
+
+async def _get_chapter_with_permission(chapter_id: int, current_user: LoginUserVO, services: dict) -> dict:
+    chapter = await services["novel_service"].get_chapter(chapter_id)
+    throw_if_not(chapter, ErrorCode.NOT_FOUND_ERROR, "章节不存在")
+    novel = await services["novel_service"].get_novel(chapter["novelId"])
+    _check_novel_permission(novel, current_user)
+    return chapter
+
+
+async def _get_character_with_permission(character_id: int, current_user: LoginUserVO, services: dict) -> dict:
+    char = await services["character_service"].get_character(character_id)
+    throw_if_not(char, ErrorCode.NOT_FOUND_ERROR, "角色不存在")
+    novel = await services["novel_service"].get_novel(char["novelId"])
+    _check_novel_permission(novel, current_user)
+    return char
+
+
+async def _get_foreshadowing_with_permission(foreshadowing_id: int, current_user: LoginUserVO, services: dict) -> dict:
+    foreshadowing = await services["foreshadowing_service"].get_foreshadowing(foreshadowing_id)
+    throw_if_not(foreshadowing, ErrorCode.NOT_FOUND_ERROR, "伏笔不存在")
+    novel = await services["novel_service"].get_novel(foreshadowing["novelId"])
+    _check_novel_permission(novel, current_user)
+    return foreshadowing
 
 
 # ========== 小说管理 ==========
@@ -83,8 +107,8 @@ async def create_novel(request: NovelCreateRequest,
         target_word_count=request.target_word_count,
     )
 
-    # 调用 Agent1 生成设定
-    result = await async_service.create_setting_sync(
+    # 异步启动设定生成，立即返回 task_id
+    task_id = await async_service.start_setting_generation(
         novel_id=novel_id,
         title=request.title.strip(),
         genre=request.genre,
@@ -93,7 +117,23 @@ async def create_novel(request: NovelCreateRequest,
         initial_characters=request.initial_characters,
     )
 
-    return {"code": 0, "data": {"novelId": novel_id, "setting": result}, "message": "ok"}
+    return {"code": 0, "data": {"novelId": novel_id, "taskId": task_id}, "message": "ok"}
+
+
+@router.post("/idea/enhance", response_model=BaseResponse[dict])
+async def enhance_novel_idea(request: NovelIdeaEnhanceRequest,
+                             current_user: LoginUserVO = Depends(require_login),
+                             services: dict = Depends(_get_services)):
+    """AI 完善小说核心创意，不创建小说记录。"""
+    raw_idea = request.raw_idea.strip()
+    throw_if(len(raw_idea) < 5, ErrorCode.PARAMS_ERROR, "请先输入你的小说创意")
+    result = await services["agent_service"].agent0_enhance_core_idea(
+        raw_idea=raw_idea,
+        genre=request.genre,
+        target_readers=request.target_readers,
+        requirements=request.requirements,
+    )
+    return {"code": 0, "data": result, "message": "ok"}
 
 
 @router.get("/list", response_model=BaseResponse[dict])
@@ -219,8 +259,7 @@ async def update_character(character_id: int, request: CharacterUpdateRequest,
                            current_user: LoginUserVO = Depends(require_login),
                            services: dict = Depends(_get_services)):
     """修改角色"""
-    char = await services["character_service"].get_character(character_id)
-    throw_if_not(char, ErrorCode.NOT_FOUND_ERROR, "角色不存在")
+    await _get_character_with_permission(character_id, current_user, services)
     await services["character_service"].update_character(
         character_id, **request.model_dump(exclude_none=True)
     )
@@ -232,6 +271,7 @@ async def delete_character(character_id: int,
                            current_user: LoginUserVO = Depends(require_login),
                            services: dict = Depends(_get_services)):
     """删除角色"""
+    await _get_character_with_permission(character_id, current_user, services)
     await services["character_service"].delete_character(character_id)
     return {"code": 0, "data": True, "message": "ok"}
 
@@ -271,6 +311,7 @@ async def update_foreshadowing(foreshadowing_id: int, request: ForeshadowingUpda
                                current_user: LoginUserVO = Depends(require_login),
                                services: dict = Depends(_get_services)):
     """修改伏笔"""
+    await _get_foreshadowing_with_permission(foreshadowing_id, current_user, services)
     await services["foreshadowing_service"].update_foreshadowing(
         foreshadowing_id, **request.model_dump(exclude_none=True)
     )
@@ -282,7 +323,8 @@ async def resolve_foreshadowing(foreshadowing_id: int,
                                 current_user: LoginUserVO = Depends(require_login),
                                 services: dict = Depends(_get_services)):
     """标记伏笔为已揭示"""
-    await services["foreshadowing_service"].abandon_foreshadowing(foreshadowing_id)
+    await _get_foreshadowing_with_permission(foreshadowing_id, current_user, services)
+    await services["foreshadowing_service"].resolve_foreshadowing(foreshadowing_id, chapter_id=None)
     return {"code": 0, "data": True, "message": "ok"}
 
 
@@ -291,6 +333,7 @@ async def abandon_foreshadowing(foreshadowing_id: int,
                                 current_user: LoginUserVO = Depends(require_login),
                                 services: dict = Depends(_get_services)):
     """标记伏笔为已放弃"""
+    await _get_foreshadowing_with_permission(foreshadowing_id, current_user, services)
     await services["foreshadowing_service"].abandon_foreshadowing(foreshadowing_id)
     return {"code": 0, "data": True, "message": "ok"}
 
@@ -337,25 +380,37 @@ async def generate_chapter(novel_id: int, request: ChapterGenerateRequest,
     novel = await services["novel_service"].get_novel(novel_id)
     _check_novel_permission(novel, current_user)
 
-    # 获取最新章节（刚刚规划的那个）
-    latest = await services["novel_service"].get_latest_chapter(novel_id)
-    throw_if_not(latest, ErrorCode.PARAMS_ERROR, "请先规划章节大纲")
-    throw_if(latest.get("status") != "draft", ErrorCode.OPERATION_ERROR, "当前章节不在草稿状态")
+    target_chapter = None
+    if request.chapter_id:
+        target_chapter = await services["novel_service"].get_chapter(request.chapter_id)
+        throw_if_not(target_chapter, ErrorCode.NOT_FOUND_ERROR, "章节不存在")
+        throw_if(target_chapter.get("novelId") != novel_id, ErrorCode.NO_AUTH_ERROR, "章节不属于当前小说")
+    else:
+        target_chapter = await services["novel_service"].get_latest_chapter(novel_id)
+
+    throw_if_not(target_chapter, ErrorCode.PARAMS_ERROR, "请先规划章节大纲")
+    throw_if(
+        target_chapter.get("status") not in {ChapterStatusEnum.DRAFT.value, ChapterStatusEnum.FAILED.value},
+        ErrorCode.OPERATION_ERROR,
+        "当前章节状态不允许生成",
+    )
 
     # 更新大纲（如果用户修改了）
     outline_text = json.dumps(request.outline, ensure_ascii=False) if request.outline else "{}"
-    await services["novel_service"].update_chapter_outline(latest["id"], request.outline)
+    await services["novel_service"].update_chapter_outline(target_chapter["id"], request.outline)
+    await services["novel_service"].update_chapter_memo(target_chapter["id"], request.outline or {})
 
     # 启动异步生成
     task_id = await services["async_service"].start_chapter_generation(
         novel_id=novel_id,
-        chapter_id=latest["id"],
-        chapter_number=latest["chapterNumber"],
+        chapter_id=target_chapter["id"],
+        chapter_number=target_chapter["chapterNumber"],
         chapter_outline=outline_text,
         author_note=request.author_note,
+        allowed_current_statuses=[ChapterStatusEnum.DRAFT.value, ChapterStatusEnum.FAILED.value],
     )
 
-    return {"code": 0, "data": {"taskId": task_id}, "message": "ok"}
+    return {"code": 0, "data": {"taskId": task_id, "chapterId": target_chapter["id"]}, "message": "ok"}
 
 
 @router.put("/chapter/{chapter_id}/confirm", response_model=BaseResponse[dict])
@@ -363,8 +418,12 @@ async def confirm_chapter(chapter_id: int, request: ChapterConfirmRequest,
                           current_user: LoginUserVO = Depends(require_login),
                           services: dict = Depends(_get_services)):
     """确认章节（阶段5，触发归档）"""
-    chapter = await services["novel_service"].get_chapter(chapter_id)
-    throw_if_not(chapter, ErrorCode.NOT_FOUND_ERROR, "章节不存在")
+    chapter = await _get_chapter_with_permission(chapter_id, current_user, services)
+    throw_if(
+        chapter.get("status") not in {ChapterStatusEnum.DRAFT.value, ChapterStatusEnum.REVISED.value, ChapterStatusEnum.FAILED.value},
+        ErrorCode.OPERATION_ERROR,
+        "当前章节状态不允许确认",
+    )
 
     # 如果用户修改了内容，先更新
     if request.content:
@@ -382,18 +441,32 @@ async def confirm_chapter(chapter_id: int, request: ChapterConfirmRequest,
         chapter_id=chapter_id,
         chapter_number=chapter["chapterNumber"],
         chapter_content=content,
+        allowed_current_statuses=[
+            ChapterStatusEnum.DRAFT.value,
+            ChapterStatusEnum.REVISED.value,
+            ChapterStatusEnum.FAILED.value,
+        ],
     )
 
-    return {"code": 0, "data": {"taskId": task_id}, "message": "ok"}
+    return {"code": 0, "data": {"taskId": task_id, "chapterId": chapter_id}, "message": "ok"}
 
 
 @router.put("/chapter/{chapter_id}/regenerate", response_model=BaseResponse[dict])
 async def regenerate_chapter(chapter_id: int,
+                             request: Optional[ChapterRegenerateRequest] = None,
                              current_user: LoginUserVO = Depends(require_login),
                              services: dict = Depends(_get_services)):
     """重新生成章节"""
-    chapter = await services["novel_service"].get_chapter(chapter_id)
-    throw_if_not(chapter, ErrorCode.NOT_FOUND_ERROR, "章节不存在")
+    chapter = await _get_chapter_with_permission(chapter_id, current_user, services)
+    throw_if(
+        chapter.get("status") not in {
+            ChapterStatusEnum.DRAFT.value,
+            ChapterStatusEnum.REVISED.value,
+            ChapterStatusEnum.FAILED.value,
+        },
+        ErrorCode.OPERATION_ERROR,
+        "当前章节状态不允许重新生成",
+    )
 
     outline = chapter.get("outline", "{}")
     task_id = await services["async_service"].start_chapter_generation(
@@ -401,8 +474,14 @@ async def regenerate_chapter(chapter_id: int,
         chapter_id=chapter_id,
         chapter_number=chapter["chapterNumber"],
         chapter_outline=outline,
+        author_note=request.author_note if request else None,
+        allowed_current_statuses=[
+            ChapterStatusEnum.DRAFT.value,
+            ChapterStatusEnum.REVISED.value,
+            ChapterStatusEnum.FAILED.value,
+        ],
     )
-    return {"code": 0, "data": {"taskId": task_id}, "message": "ok"}
+    return {"code": 0, "data": {"taskId": task_id, "chapterId": chapter_id}, "message": "ok"}
 
 
 @router.put("/chapter/{chapter_id}/content", response_model=BaseResponse[bool])
@@ -410,11 +489,16 @@ async def update_chapter_content(chapter_id: int, request: ChapterContentUpdateR
                                  current_user: LoginUserVO = Depends(require_login),
                                  services: dict = Depends(_get_services)):
     """手动修改章节内容"""
-    chapter = await services["novel_service"].get_chapter(chapter_id)
-    throw_if_not(chapter, ErrorCode.NOT_FOUND_ERROR, "章节不存在")
+    chapter = await _get_chapter_with_permission(chapter_id, current_user, services)
+    throw_if(
+        chapter.get("status") in {ChapterStatusEnum.GENERATING.value, ChapterStatusEnum.ARCHIVING.value},
+        ErrorCode.OPERATION_ERROR,
+        "处理中章节暂不能编辑",
+    )
     word_count = len(request.content)
     await services["novel_service"].update_chapter_content(chapter_id, request.content, word_count)
-    await services["novel_service"].update_chapter_status(chapter_id, "revised")
+    await services["novel_service"].update_chapter_status(chapter_id, ChapterStatusEnum.REVISED.value)
+    await services["novel_service"].recalculate_novel_stats(chapter["novelId"])
     return {"code": 0, "data": True, "message": "ok"}
 
 
@@ -423,12 +507,12 @@ async def delete_chapter(chapter_id: int,
                          current_user: LoginUserVO = Depends(require_login),
                          services: dict = Depends(_get_services)):
     """删除章节"""
-    chapter = await services["novel_service"].get_chapter(chapter_id)
-    throw_if_not(chapter, ErrorCode.NOT_FOUND_ERROR, "章节不存在")
-
-    # 检查权限
-    novel = await services["novel_service"].get_novel(chapter["novelId"])
-    _check_novel_permission(novel, current_user)
+    chapter = await _get_chapter_with_permission(chapter_id, current_user, services)
+    throw_if(
+        chapter.get("status") in {ChapterStatusEnum.GENERATING.value, ChapterStatusEnum.ARCHIVING.value},
+        ErrorCode.OPERATION_ERROR,
+        "处理中章节不能删除",
+    )
 
     await services["novel_service"].delete_chapter(chapter_id)
     await services["novel_service"].recalculate_novel_stats(chapter["novelId"])
@@ -441,12 +525,12 @@ async def update_chapter_title(chapter_id: int,
                                current_user: LoginUserVO = Depends(require_login),
                                services: dict = Depends(_get_services)):
     """修改章节标题"""
-    chapter = await services["novel_service"].get_chapter(chapter_id)
-    throw_if_not(chapter, ErrorCode.NOT_FOUND_ERROR, "章节不存在")
-
-    # 检查权限
-    novel = await services["novel_service"].get_novel(chapter["novelId"])
-    _check_novel_permission(novel, current_user)
+    chapter = await _get_chapter_with_permission(chapter_id, current_user, services)
+    throw_if(
+        chapter.get("status") in {ChapterStatusEnum.GENERATING.value, ChapterStatusEnum.ARCHIVING.value},
+        ErrorCode.OPERATION_ERROR,
+        "处理中章节暂不能改名",
+    )
 
     title = request.get("title", "").strip()
     throw_if(not title, ErrorCode.PARAMS_ERROR, "标题不能为空")
@@ -471,9 +555,29 @@ async def get_chapter(chapter_id: int,
                       current_user: LoginUserVO = Depends(require_login),
                       services: dict = Depends(_get_services)):
     """获取章节详情"""
-    chapter = await services["novel_service"].get_chapter(chapter_id)
-    throw_if_not(chapter, ErrorCode.NOT_FOUND_ERROR, "章节不存在")
+    chapter = await _get_chapter_with_permission(chapter_id, current_user, services)
     return {"code": 0, "data": chapter, "message": "ok"}
+
+
+@router.get("/chapter/{chapter_id}/context-snapshot", response_model=BaseResponse[dict])
+async def get_chapter_context_snapshot(chapter_id: int,
+                                       current_user: LoginUserVO = Depends(require_login),
+                                       services: dict = Depends(_get_services)):
+    """读取章节最近一次上下文快照。"""
+    await _get_chapter_with_permission(chapter_id, current_user, services)
+    snapshot = await services["novel_service"].get_context_snapshot_by_chapter(chapter_id)
+    return {"code": 0, "data": snapshot or {}, "message": "ok"}
+
+
+@router.get("/chapter/{chapter_id}/versions", response_model=BaseResponse[list])
+async def get_chapter_versions(chapter_id: int,
+                               include_content: bool = Query(False, alias="includeContent"),
+                               current_user: LoginUserVO = Depends(require_login),
+                               services: dict = Depends(_get_services)):
+    """读取章节版本记录。"""
+    await _get_chapter_with_permission(chapter_id, current_user, services)
+    versions = await services["novel_service"].get_chapter_versions(chapter_id, include_content=include_content)
+    return {"code": 0, "data": versions, "message": "ok"}
 
 
 # ========== 审查与导出 ==========
@@ -505,15 +609,37 @@ async def export_novel(novel_id: int, format: str = "docx",
     return {"code": 50000, "data": None, "message": "导出功能暂未实现"}
 
 
+@router.get("/task/{task_id}", response_model=BaseResponse[TaskStatusVO])
+async def get_task_status(task_id: str,
+                          current_user: LoginUserVO = Depends(require_login),
+                          services: dict = Depends(_get_services)):
+    """获取任务状态和已缓存事件。"""
+    try:
+        task = await services["async_service"].get_task_status(task_id)
+    except ValueError as error:
+        throw_if(True, ErrorCode.NOT_FOUND_ERROR, str(error))
+    novel_id = task.get("novelId")
+    if novel_id:
+        novel = await services["novel_service"].get_novel(novel_id)
+        _check_novel_permission(novel, current_user)
+    return {"code": 0, "data": task, "message": "ok"}
+
+
 # ========== SSE 进度流 ==========
 
 
 @router.get("/progress/{task_id}")
-async def progress_stream(task_id: str):
+async def progress_stream(task_id: str,
+                          current_user: LoginUserVO = Depends(require_login),
+                          services: dict = Depends(_get_services)):
     """SSE 进度流
 
     复用现有 sse_emitter_manager 的模式。
     前端通过 EventSource 连接这个接口，实时接收进度消息。
     """
-    throw_if_not(sse_emitter_manager.exists(task_id), ErrorCode.NOT_FOUND_ERROR, "任务不存在或已结束")
-    return sse_emitter_manager.create_emitter(task_id)
+    task = await services["async_service"].get_task_status(task_id)
+    novel_id = task.get("novelId")
+    if novel_id:
+        novel = await services["novel_service"].get_novel(novel_id)
+        _check_novel_permission(novel, current_user)
+    return sse_emitter_manager.create_emitter(task_id, redis_backed=True)

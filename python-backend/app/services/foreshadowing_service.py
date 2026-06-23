@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 class ForeshadowingService:
     """伏笔生命周期管理服务"""
 
+    DEFAULT_DEBT_POLICY = {
+        "importanceThresholds": {"5": 8, "4": 10, "default": 14},
+        "nearTargetLeadChapters": 3,
+    }
+
     def __init__(self, db: Database):
         self.db = db
 
@@ -30,12 +35,14 @@ class ForeshadowingService:
             INSERT INTO foreshadowing (
                 novelId, surface, hiddenTruth, category,
                 relatedCharacters, keywords, targetChapter,
-                importance, status, plantedChapterId,
+                importance, status, lifecycleStage, plantedChapterId,
+                lastActionType, lastActionChapter, lastActionNote,
                 createTime, updateTime
             ) VALUES (
                 :novelId, :surface, :hiddenTruth, :category,
                 :relatedCharacters, :keywords, :targetChapter,
-                :importance, :status, :plantedChapterId,
+                :importance, :status, :lifecycleStage, :plantedChapterId,
+                :lastActionType, :lastActionChapter, :lastActionNote,
                 :createTime, :updateTime
             )
         """
@@ -51,7 +58,11 @@ class ForeshadowingService:
                 "targetChapter": target_chapter,
                 "importance": importance,
                 "status": "active",
+                "lifecycleStage": "planted",
                 "plantedChapterId": planted_chapter_id,
+                "lastActionType": "plant",
+                "lastActionChapter": None,
+                "lastActionNote": "新埋伏笔",
                 "createTime": now,
                 "updateTime": now,
             },
@@ -112,7 +123,7 @@ class ForeshadowingService:
                 continue
 
             # 检查 related_characters 字段
-            fs_characters = set(fs.get("related_characters") or [])
+            fs_characters = set(fs.get("relatedCharacters") or [])
             if fs_characters & keyword_set:
                 results.append(fs)
                 continue
@@ -130,18 +141,106 @@ class ForeshadowingService:
         all_active = await self.get_active_foreshadowing(novel_id)
         results = []
         for fs in all_active:
-            last_mentioned = fs.get("last_mentioned_chapter") or 0
+            last_mentioned = fs.get("lastMentionedChapter") or 0
             # 如果从未提及，用埋设章节号
             if last_mentioned == 0:
                 # 需要从 planted_chapter_id 查出 chapter_number
                 # 简化处理：如果 planted_chapter_id 存在，假设 chapter_number 就是它
                 # 实际应该查 chapter 表，但这里为了简化用 planted_chapter_id 作为近似值
-                last_mentioned = fs.get("planted_chapter_id") or 0
+                last_mentioned = fs.get("plantedChapterId") or 0
 
             if last_mentioned > 0 and (current_chapter - last_mentioned) > threshold:
                 results.append(fs)
 
         return results
+
+    async def get_hook_debt(self, novel_id: int, current_chapter: int,
+                            limit: int = 10) -> List[Dict[str, Any]]:
+        """按沉默章节数和重要度计算需要提醒的伏笔债务。"""
+        policy = await self._get_debt_policy(novel_id)
+        query = """
+            SELECT f.*, c.chapterNumber AS plantedChapterNumber
+            FROM foreshadowing f
+            LEFT JOIN chapter c ON f.plantedChapterId = c.id
+            WHERE f.novelId = :novelId AND f.status = 'active'
+            ORDER BY f.importance DESC, f.createTime ASC
+        """
+        rows = await self.db.fetch_all(query=query, values={"novelId": novel_id})
+        debts = []
+        for row in rows:
+            fs = self._parse(row)
+            planted_number = fs.get("plantedChapterNumber") or 0
+            anchor = max(
+                fs.get("lastMentionedChapter") or 0,
+                fs.get("lastActionChapter") or 0,
+                planted_number,
+            )
+            if not anchor:
+                anchor = current_chapter
+            silent_chapters = max(0, current_chapter - anchor)
+            importance = int(fs.get("importance") or 3)
+            threshold = self._threshold_for_importance(importance, policy)
+            stage = fs.get("lifecycleStage") or "open"
+
+            low, high = self._parse_chapter_range(fs.get("targetChapter") or "")
+            near_lead = int(policy.get("nearTargetLeadChapters") or 3)
+            near_target = low is not None and (low - near_lead) <= current_chapter <= (high or low)
+            if silent_chapters >= threshold:
+                stage = "pressured"
+            elif near_target:
+                stage = "near_payoff"
+            elif fs.get("lastActionType") in {"mention", "advance"}:
+                stage = "progressing"
+            elif stage == "planted" and silent_chapters > 0:
+                stage = "open"
+
+            if stage in {"pressured", "near_payoff", "progressing"}:
+                fs["silentChapters"] = silent_chapters
+                fs["debtReason"] = self._build_debt_reason(fs, stage, silent_chapters)
+                fs["computedLifecycleStage"] = stage
+                debts.append(fs)
+
+        return sorted(
+            debts,
+            key=lambda item: (
+                0 if item.get("computedLifecycleStage") == "pressured" else 1,
+                -(item.get("importance") or 0),
+                -(item.get("silentChapters") or 0),
+            ),
+        )[:limit]
+
+    async def _get_debt_policy(self, novel_id: int) -> Dict[str, Any]:
+        """读取伏笔债务策略；未配置时使用默认策略。"""
+        policy = dict(self.DEFAULT_DEBT_POLICY)
+        row = await self.db.fetch_one(
+            "SELECT stateData FROM novel_state WHERE novelId = :novelId AND stateType = 'foreshadowing_debt_policy'",
+            values={"novelId": novel_id},
+        )
+        if row and row["stateData"]:
+            try:
+                custom = json.loads(row["stateData"])
+                if isinstance(custom, dict):
+                    thresholds = custom.get("importanceThresholds")
+                    if isinstance(thresholds, dict):
+                        policy["importanceThresholds"] = {**policy["importanceThresholds"], **thresholds}
+                    if custom.get("nearTargetLeadChapters") is not None:
+                        policy["nearTargetLeadChapters"] = int(custom["nearTargetLeadChapters"])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                logger.warning("伏笔债务策略解析失败, novel_id=%s", novel_id)
+        return policy
+
+    @classmethod
+    def _threshold_for_importance(cls, importance: int, policy: Optional[Dict[str, Any]] = None) -> int:
+        """根据重要度和策略返回沉默章节阈值。"""
+        active_policy = policy or cls.DEFAULT_DEBT_POLICY
+        thresholds = active_policy.get("importanceThresholds") or {}
+        if importance >= 5:
+            key = "5"
+        elif importance == 4:
+            key = "4"
+        else:
+            key = str(importance)
+        return int(thresholds.get(key, thresholds.get("default", 14)))
 
     async def get_near_target_foreshadowing(self, novel_id: int,
                                             current_chapter: int) -> List[Dict[str, Any]]:
@@ -153,7 +252,7 @@ class ForeshadowingService:
         all_active = await self.get_active_foreshadowing(novel_id)
         results = []
         for fs in all_active:
-            target = fs.get("target_chapter")
+            target = fs.get("targetChapter")
             if not target:
                 continue
 
@@ -195,22 +294,34 @@ class ForeshadowingService:
             UPDATE foreshadowing
             SET mentionHistory = :history,
                 lastMentionedChapter = :chapterNumber,
+                lifecycleStage = :lifecycleStage,
+                lastActionType = :lastActionType,
+                lastActionChapter = :chapterNumber,
+                lastActionNote = :lastActionNote,
                 updateTime = :updateTime
             WHERE id = :id
         """
         await self.db.execute(query=query, values={
             "history": json.dumps(history, ensure_ascii=False),
             "chapterNumber": chapter_number,
+            "lifecycleStage": "progressing",
+            "lastActionType": "mention",
+            "lastActionNote": context or "本章呼应",
             "updateTime": datetime.now(),
             "id": foreshadowing_id,
         })
         return True
 
-    async def resolve_foreshadowing(self, foreshadowing_id: int, chapter_id: int) -> bool:
+    async def resolve_foreshadowing(self, foreshadowing_id: int, chapter_id: Optional[int] = None) -> bool:
         """标记伏笔为已揭示"""
         query = """
             UPDATE foreshadowing
-            SET status = 'resolved', resolvedChapterId = :chapterId, updateTime = :updateTime
+            SET status = 'resolved',
+                lifecycleStage = 'near_payoff',
+                resolvedChapterId = :chapterId,
+                lastActionType = 'resolve',
+                lastActionNote = '伏笔揭示',
+                updateTime = :updateTime
             WHERE id = :id
         """
         await self.db.execute(query=query, values={
@@ -219,6 +330,30 @@ class ForeshadowingService:
             "id": foreshadowing_id,
         })
         logger.info("伏笔已揭示, id=%s, chapter_id=%s", foreshadowing_id, chapter_id)
+        return True
+
+    async def update_lifecycle(self, foreshadowing_id: int, lifecycle_stage: str,
+                               action_type: Optional[str] = None,
+                               chapter_number: Optional[int] = None,
+                               note: Optional[str] = None) -> bool:
+        """更新伏笔内部生命周期。"""
+        query = """
+            UPDATE foreshadowing
+            SET lifecycleStage = :lifecycleStage,
+                lastActionType = :lastActionType,
+                lastActionChapter = :lastActionChapter,
+                lastActionNote = :lastActionNote,
+                updateTime = :updateTime
+            WHERE id = :id
+        """
+        await self.db.execute(query=query, values={
+            "lifecycleStage": lifecycle_stage,
+            "lastActionType": action_type,
+            "lastActionChapter": chapter_number,
+            "lastActionNote": note,
+            "updateTime": datetime.now(),
+            "id": foreshadowing_id,
+        })
         return True
 
     async def abandon_foreshadowing(self, foreshadowing_id: int) -> bool:
@@ -240,6 +375,10 @@ class ForeshadowingService:
             "keywords": "keywords",
             "target_chapter": "targetChapter",
             "importance": "importance",
+            "lifecycle_stage": "lifecycleStage",
+            "last_action_type": "lastActionType",
+            "last_action_chapter": "lastActionChapter",
+            "last_action_note": "lastActionNote",
         }
         json_fields = {"related_characters", "keywords"}
 
@@ -273,27 +412,19 @@ class ForeshadowingService:
                     d[field] = json.loads(d[field])
                 except json.JSONDecodeError:
                     pass
-        # 转换为 snake_case key（方便上层使用）
-        return {
-            "id": d["id"],
-            "novel_id": d["novelId"],
-            "surface": d["surface"],
-            "hidden_truth": d.get("hiddenTruth"),
-            "category": d.get("category"),
-            "related_characters": d.get("relatedCharacters"),
-            "related_locations": d.get("relatedLocations"),
-            "related_skills": d.get("relatedSkills"),
-            "planted_chapter_id": d.get("plantedChapterId"),
-            "target_chapter": d.get("targetChapter"),
-            "resolved_chapter_id": d.get("resolvedChapterId"),
-            "keywords": d.get("keywords"),
-            "importance": d.get("importance", 3),
-            "status": d["status"],
-            "mention_history": d.get("mentionHistory"),
-            "last_mentioned_chapter": d.get("lastMentionedChapter"),
-            "create_time": d["createTime"].isoformat() if d.get("createTime") else None,
-            "update_time": d["updateTime"].isoformat() if d.get("updateTime") else None,
-        }
+        if d.get("createTime"):
+            d["createTime"] = d["createTime"].isoformat()
+        if d.get("updateTime"):
+            d["updateTime"] = d["updateTime"].isoformat()
+        return d
+
+    def _build_debt_reason(self, fs: Dict[str, Any], stage: str, silent_chapters: int) -> str:
+        """生成伏笔债务说明。"""
+        if stage == "pressured":
+            return f"已沉默{silent_chapters}章，重要度{fs.get('importance', 3)}，本章应推进、解释或明确暂缓。"
+        if stage == "near_payoff":
+            return f"接近计划揭示区间{fs.get('targetChapter')}，需要制造清晰铺垫或兑现。"
+        return f"已有推进记录，需避免只口头提及，最好用动作、物件或对话继续推进。"
 
     def _parse_chapter_range(self, target: str):
         """解析章节范围字符串，如 '80-100' -> (80, 100)，'50' -> (50, 50)"""

@@ -2,13 +2,13 @@
 
 import logging
 from typing import Optional
-from openai import AsyncOpenAI
 
 from app.config import settings
 from app.constants.prompt import PromptConstant
 from app.constants.article import ArticleConstant
 from app.models.enums import ImageMethodEnum
 from app.services.image_search_service import ImageSearchService
+from app.services.llm_client import create_chat_client, get_chat_model
 from app.schemas.image import ImageData, ImageRequest
 
 logger = logging.getLogger(__name__)
@@ -18,12 +18,8 @@ class SvgDiagramService(ImageSearchService):
     """SVG 概念示意图生成服务"""
     
     def __init__(self):
-        # 使用 DashScope
-        self.client = AsyncOpenAI(
-            api_key=settings.dashscope_api_key,
-            base_url=settings.dashscope_base_url
-        )
-        self.model = settings.dashscope_model
+        self.client = create_chat_client()
+        self.model = get_chat_model()
         self.default_width = settings.svg_diagram_default_width
         self.default_height = settings.svg_diagram_default_height
     
